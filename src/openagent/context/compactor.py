@@ -128,7 +128,9 @@ class Compactor:
         """Call LLM provider to summarize history into structured bullet points."""
         transcript_lines: list[str] = []
         for m in messages:
-            if m.role == "user":
+            if m.metadata.get("is_summary") or "[Previous Summary]" in m.text or "[Prior Context Summary]" in m.text:
+                transcript_lines.append(f"Prior Summary: {m.text}")
+            elif m.role == "user":
                 transcript_lines.append(f"User: {m.text}")
             elif m.role == "assistant":
                 parts = []

@@ -1,0 +1,134 @@
+"""Streaming event union.
+
+Every provider adapter normalises its native wire events into these types. The
+TUI and the agent loop therefore never import an adapter, which is what keeps
+OpenAgent genuinely model-agnostic: adding a provider cannot break the UI.
+
+Copyright 2026 The OpenAgent Contributors
+Licensed under the Apache License, Version 2.0.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import TypeAlias
+
+from .types import FinishReason, Message, ToolCall, Usage
+
+
+@dataclass(slots=True)
+class StartEvent:
+    """Fired once when the request has been accepted."""
+
+    model: str = ""
+    provider: str = ""
+    created: float = field(default_factory=time.time)
+
+
+@dataclass(slots=True)
+class TextDelta:
+    """An increment of assistant-visible text."""
+
+    text: str
+    index: int = 0
+
+
+@dataclass(slots=True)
+class ThinkingDelta:
+    """An increment of reasoning text, for models that expose it."""
+
+    text: str
+    index: int = 0
+
+
+@dataclass(slots=True)
+class ToolCallStart:
+    """A model started emitting a tool call.
+
+    Providers that stream arguments incrementally emit ``ToolCallDelta`` events
+    until ``ToolCallEnd``.
+    """
+
+    index: int
+    id: str = ""
+    name: str = ""
+
+
+@dataclass(slots=True)
+class ToolCallDelta:
+    """A fragment of the JSON arguments of the tool call at ``index``."""
+
+    index: int
+    arguments_delta: str = ""
+
+
+@dataclass(slots=True)
+class ToolCallEnd:
+    """The tool call at ``index`` is complete."""
+
+    index: int
+    call: ToolCall | None = None
+
+
+@dataclass(slots=True)
+class UsageEvent:
+    """Token accounting reported by the provider, often only at the very end."""
+
+    usage: Usage
+
+
+@dataclass(slots=True)
+class DoneEvent:
+    """Terminal event of a successful stream."""
+
+    finish_reason: FinishReason = FinishReason.STOP
+    message: Message | None = None
+    usage: Usage = field(default_factory=Usage)
+
+
+@dataclass(slots=True)
+class ErrorEvent:
+    """Terminal event of a failed stream."""
+
+    error: BaseException | str
+    retryable: bool = False
+
+
+StreamEvent: TypeAlias = (
+    StartEvent
+    | TextDelta
+    | ThinkingDelta
+    | ToolCallStart
+    | ToolCallDelta
+    | ToolCallEnd
+    | UsageEvent
+    | DoneEvent
+    | ErrorEvent
+)
+
+
+def final_message(
+    text: str,
+    *,
+    reasoning: str | None = None,
+    tool_calls: Iterable[ToolCall] | None = None,
+) -> Message:
+    """Build the assistant message implied by a completed stream."""
+    return Message.assistant(text, tool_calls=list(tool_calls or ()), reasoning=reasoning)
+
+
+# Human-readable prefixes used by the TUI. Keeping them here (rather than in the
+# TUI) lets the CLI and tests share identical wording.
+EVENT_LABELS: dict[type, str] = {
+    StartEvent: "start",
+    TextDelta: "text",
+    ThinkingDelta: "thinking",
+    ToolCallStart: "tool-start",
+    ToolCallDelta: "tool-args",
+    ToolCallEnd: "tool-end",
+    UsageEvent: "usage",
+    DoneEvent: "done",
+    ErrorEvent: "error",
+}

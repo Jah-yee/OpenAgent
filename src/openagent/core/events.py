@@ -73,6 +73,16 @@ class ToolCallEnd:
 
 
 @dataclass(slots=True)
+class ToolResultEvent:
+    """A tool execution completed and produced an output."""
+
+    call_id: str
+    tool_name: str
+    output: str
+    is_error: bool = False
+
+
+@dataclass(slots=True)
 class UsageEvent:
     """Token accounting reported by the provider, often only at the very end."""
 
@@ -103,6 +113,7 @@ StreamEvent: TypeAlias = (
     | ToolCallStart
     | ToolCallDelta
     | ToolCallEnd
+    | ToolResultEvent
     | UsageEvent
     | DoneEvent
     | ErrorEvent
@@ -128,6 +139,7 @@ EVENT_LABELS: dict[type, str] = {
     ToolCallStart: "tool-start",
     ToolCallDelta: "tool-args",
     ToolCallEnd: "tool-end",
+    ToolResultEvent: "tool-result",
     UsageEvent: "usage",
     DoneEvent: "done",
     ErrorEvent: "error",

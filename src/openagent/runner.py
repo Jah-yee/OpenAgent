@@ -125,6 +125,7 @@ class AgentRunner:
     ) -> AsyncIterator[StreamEvent]:
         """Execute a conversational turn across streaming model calls and tools."""
         self._ensure_system_prompt()
+        initial_msg_count = len(self.messages)
 
         user_msg = Message.user(user_input) if isinstance(user_input, str) else user_input
         self.messages.append(user_msg)
@@ -198,9 +199,13 @@ class AgentRunner:
             except Exception as exc:
                 err_ev = ErrorEvent(error=exc)
                 yield err_ev
+                while len(self.messages) > initial_msg_count:
+                    self.messages.pop()
                 return
 
             if error_encountered is not None:
+                while len(self.messages) > initial_msg_count:
+                    self.messages.pop()
                 return
 
             if done_event is not None and done_event.usage.total_tokens > 0:
@@ -249,7 +254,7 @@ class AgentRunner:
                 ask_callback=ask_callback,
             )
 
-            for call, result in zip(assistant_msg.tool_calls, tool_results, strict=False):
+            for call, result in zip(assistant_msg.tool_calls, tool_results, strict=True):
                 yield ToolResultEvent(
                     call_id=result.call_id,
                     tool_name=call.name,
@@ -263,7 +268,7 @@ class AgentRunner:
             # Reached max_tool_iterations without model concluding
             terminal_event = DoneEvent(
                 finish_reason=FinishReason.LENGTH,
-                message=self.messages.last_message,
+                message=Message.assistant("Reached maximum tool call iterations without concluding."),
                 usage=cumulative_usage,
             )
             yield terminal_event
@@ -283,9 +288,9 @@ class AgentRunner:
             elif isinstance(event, DoneEvent) and event.message and event.message.text:
                 done_text = event.message.text
 
-        if text_chunks:
-            return "".join(text_chunks)
-        return done_text
+        if done_text.strip():
+            return done_text
+        return "".join(text_chunks)
 
     def reset(self) -> None:
         """Clear active turn state while preserving or re-initializing configuration."""

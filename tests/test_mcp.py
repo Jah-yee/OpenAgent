@@ -240,6 +240,7 @@ async def test_mcp_client_sse_connect() -> None:
             url="http://localhost:8080/sse",
             headers={"X-Test": "val"},
             timeout=10.0,
+            sse_read_timeout=30.0,
         )
         mock_session_cls.assert_called_once_with(
             "read_stream", "write_stream", read_timeout_seconds=30.0

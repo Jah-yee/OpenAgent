@@ -46,12 +46,15 @@ class MCPServerConfig:
             raise ValueError(f"Invalid transport: '{transport_raw}'. Expected 'stdio' or 'sse'.")
         transport: Literal["stdio", "sse"] = "stdio" if transport_raw == "stdio" else "sse"
 
+        env_raw = data.get("env")
+        env_dict = {str(k): str(v) for k, v in env_raw.items()} if env_raw is not None else None
+
         return cls(
             name=server_name,
             transport=transport,
             command=str(data.get("command", "")),
             args=list(data.get("args") or []),
-            env=dict(data["env"]) if data.get("env") is not None else None,
+            env=env_dict,
             cwd=data.get("cwd"),
             url=str(data.get("url", "")),
             headers=dict(data["headers"]) if data.get("headers") is not None else None,
@@ -128,12 +131,15 @@ class MCPClient:
                 )
                 read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
             elif self.config.transport == "sse":
+                sse_kwargs: dict[str, Any] = {
+                    "url": self.config.url,
+                    "headers": self.config.headers,
+                    "timeout": self.config.timeout,
+                }
+                if self.config.read_timeout is not None:
+                    sse_kwargs["sse_read_timeout"] = self.config.read_timeout
                 read_stream, write_stream = await stack.enter_async_context(
-                    sse_client(
-                        url=self.config.url,
-                        headers=self.config.headers,
-                        timeout=self.config.timeout,
-                    )
+                    sse_client(**sse_kwargs)
                 )
             else:
                 raise ValueError(f"Unsupported transport: {self.config.transport}")
@@ -163,7 +169,9 @@ class MCPClient:
         result = await self._session.list_tools()
         tools = list(result.tools)
         cursor = result.next_cursor
-        while cursor:
+        seen_cursors: set[str] = set()
+        while cursor and cursor not in seen_cursors and len(seen_cursors) < 1000:
+            seen_cursors.add(cursor)
             result = await self._session.list_tools(params=types.PaginatedRequestParams(cursor=cursor))
             tools.extend(result.tools)
             cursor = result.next_cursor

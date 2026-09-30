@@ -72,6 +72,8 @@ class MCPManager:
         except Exception as exc:
             self.failed_servers[name] = exc
             logger.warning("Failed to connect to MCP server '%s': %s", name, exc)
+            for tool in wrapped_tools:
+                self.registry.unregister(tool.name)
             with contextlib.suppress(Exception):
                 await client.close()
             raise

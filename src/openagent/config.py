@@ -9,6 +9,7 @@ Licensed under the Apache License, Version 2.0.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -294,13 +295,13 @@ def save_config(config: OpenAgentConfig, target_path: str | Path) -> None:
 
     lines: list[str] = [
         "# OpenAgent configuration file",
-        f'model = "{config.model}"',
+        f"model = {json.dumps(config.model)}",
     ]
 
     if config.base_url:
-        lines.append(f'base_url = "{config.base_url}"')
+        lines.append(f"base_url = {json.dumps(config.base_url)}")
     if config.api_key:
-        lines.append(f'api_key = "{config.api_key}"')
+        lines.append(f"api_key = {json.dumps(config.api_key)}")
     if config.temperature is not None:
         lines.append(f"temperature = {config.temperature}")
     if config.top_p is not None:
@@ -309,34 +310,35 @@ def save_config(config: OpenAgentConfig, target_path: str | Path) -> None:
         lines.append(f"max_tokens = {config.max_tokens}")
     lines.append(f"max_tool_iterations = {config.max_tool_iterations}")
     lines.append(f"auto_approve = {'true' if config.auto_approve else 'false'}")
-    lines.append(f'workspace = "{config.workspace.as_posix()}"')
+    lines.append(f"workspace = {json.dumps(config.workspace.as_posix())}")
 
     if config.extra_instructions:
-        escaped_instr = [f'"{x}"' for x in config.extra_instructions]
+        escaped_instr = [json.dumps(x) for x in config.extra_instructions]
         lines.append(f"extra_instructions = [{', '.join(escaped_instr)}]")
 
     # Danger policy table
     lines.append("\n[danger_policy]")
     for danger, action in config.danger_policy.items():
         act_val = action.value if isinstance(action, PermissionAction) else str(action)
-        lines.append(f'{danger} = "{act_val}"')
+        lines.append(f"{danger} = {json.dumps(act_val)}")
 
     # MCP servers
     for server in config.mcp_servers:
         lines.append("\n[[mcp_servers]]")
-        lines.append(f'name = "{server.name}"')
-        lines.append(f'transport = "{server.transport}"')
+        lines.append(f"name = {json.dumps(server.name)}")
+        lines.append(f"transport = {json.dumps(server.transport)}")
         if server.command:
-            lines.append(f'command = "{server.command}"')
+            lines.append(f"command = {json.dumps(server.command)}")
         if server.args:
-            args_str = ", ".join(f'"{a}"' for a in server.args)
+            args_str = ", ".join(json.dumps(a) for a in server.args)
             lines.append(f"args = [{args_str}]")
         if server.url:
-            lines.append(f'url = "{server.url}"')
+            lines.append(f"url = {json.dumps(server.url)}")
         if server.cwd:
-            lines.append(f'cwd = "{Path(server.cwd).as_posix()}"')
+            lines.append(f"cwd = {json.dumps(Path(server.cwd).as_posix())}")
         if server.env:
-            lines.append(f"env = {server.env}")
+            items = ", ".join(f"{json.dumps(k)} = {json.dumps(str(v))}" for k, v in server.env.items())
+            lines.append(f"env = {{ {items} }}")
 
     content = "\n".join(lines) + "\n"
     path.write_text(content, encoding="utf-8")

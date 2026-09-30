@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
 
+from openagent import __version__
 from openagent.core.events import (
     DoneEvent,
     ErrorEvent,
@@ -198,7 +199,7 @@ async def run_repl(
     session_id = getattr(runner, "session_id", None) or "new"
 
     header_text = (
-        f"[bold cyan]OpenAgent[/bold cyan] [dim]v0.1.0[/dim]\n"
+        f"[bold cyan]OpenAgent[/bold cyan] [dim]v{__version__}[/dim]\n"
         f"Model: [bold green]{model_name}[/bold green] | "
         f"Workspace: [dim]{workspace}[/dim] | "
         f"Session: [dim]{session_id[:8] if len(session_id) > 8 else session_id}[/dim]\n"

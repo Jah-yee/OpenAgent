@@ -44,58 +44,79 @@ def get_console() -> Console:
     return _console
 
 
+class _OpenAgentArgumentParser(argparse.ArgumentParser):
+    """Custom parser ensuring root default attributes are preserved when using subparsers."""
+
+    def parse_args(  # type: ignore[override]
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        if namespace is None:
+            namespace = argparse.Namespace(
+                model=None,
+                base_url=None,
+                api_key=None,
+                workspace=None,
+                resume=None,
+                yes=False,
+                config=None,
+            )
+        return super().parse_args(args=args, namespace=namespace)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct command-line argument parser with subcommands and global flags."""
-    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser = _OpenAgentArgumentParser(add_help=False)
     common_parser.add_argument(
         "--model",
         "-m",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Model identifier or provider-prefixed reference (e.g. gpt-4o, anthropic/claude-3-5-sonnet)",
     )
     common_parser.add_argument(
         "--base-url",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Custom API base URL",
     )
     common_parser.add_argument(
         "--api-key",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Custom API key credential",
     )
     common_parser.add_argument(
         "--workspace",
         "-w",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Workspace root directory (defaults to current directory)",
     )
     common_parser.add_argument(
         "--resume",
         "-r",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Resume an existing conversation session by ID",
     )
     common_parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
-        default=False,
+        default=argparse.SUPPRESS,
         help="Automatically approve all tool executions without confirmation prompts",
     )
     common_parser.add_argument(
         "--config",
         "-c",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Path to custom TOML configuration file",
     )
 
-    root_parser = argparse.ArgumentParser(
+    root_parser = _OpenAgentArgumentParser(
         prog="openagent",
         description="OpenAgent: A model-agnostic AI coding agent for the terminal.",
         parents=[common_parser],
@@ -359,10 +380,44 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args_list = list(argv)
 
-    # If first argument looks like a prompt rather than a subcommand or flag, default to 'run'
+    # If no subcommand was provided but a prompt positional argument is present, default to 'run'
     known_subcommands = {"run", "chat", "models", "sessions", "config"}
-    if args_list and not args_list[0].startswith("-") and args_list[0] not in known_subcommands:
-        args_list.insert(0, "run")
+    val_options = {
+        "--model", "-m",
+        "--base-url",
+        "--api-key",
+        "--workspace", "-w",
+        "--resume", "-r",
+        "--config", "-c",
+    }
+
+    has_subcommand = False
+    first_positional_idx: int | None = None
+    i = 0
+    while i < len(args_list):
+        arg = args_list[i]
+        if arg in ("--help", "-h", "--version", "-v"):
+            has_subcommand = True
+            break
+        if arg in val_options:
+            i += 2
+            continue
+        if any(arg.startswith(f"{opt}=") for opt in val_options):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        if arg in known_subcommands:
+            has_subcommand = True
+            break
+        if first_positional_idx is None:
+            first_positional_idx = i
+            break
+        i += 1
+
+    if not has_subcommand and first_positional_idx is not None:
+        args_list.insert(first_positional_idx, "run")
 
     parser = _build_parser()
     try:

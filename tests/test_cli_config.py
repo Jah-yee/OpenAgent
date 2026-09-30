@@ -396,3 +396,61 @@ async def test_run_repl_loop() -> None:
     assert "Context cleared" in output
     assert "Exiting OpenAgent" in output
 
+
+def test_cli_flags_before_subcommand() -> None:
+    from openagent.cli import _build_parser
+
+    parser = _build_parser()
+    args1 = parser.parse_args(["--yes", "run", "do task"])
+    assert args1.subcommand == "run"
+    assert args1.yes is True
+    assert args1.prompt == ["do task"]
+
+    args2 = parser.parse_args(["-m", "anthropic/claude-3-5-sonnet", "chat"])
+    assert args2.subcommand == "chat"
+    assert args2.model == "anthropic/claude-3-5-sonnet"
+
+
+def test_cli_shorthand_with_leading_flags(tmp_path: Path) -> None:
+    captured_args = {}
+
+    async def fake_async_run(args, console):
+        captured_args["subcommand"] = args.subcommand
+        captured_args["model"] = args.model
+        captured_args["yes"] = args.yes
+        captured_args["prompt"] = args.prompt
+        return 0
+
+    with patch("openagent.cli._async_run", side_effect=fake_async_run):
+        code = main(["-m", "custom-model", "-y", "execute this prompt"])
+        assert code == 0
+        assert captured_args["subcommand"] == "run"
+        assert captured_args["model"] == "custom-model"
+        assert captured_args["yes"] is True
+        assert captured_args["prompt"] == ["execute this prompt"]
+
+
+def test_save_config_with_mcp_env(tmp_path: Path) -> None:
+    from openagent.tools.mcp.client import MCPServerConfig
+
+    cfg_file = tmp_path / "mcp_env_config.toml"
+    cfg = OpenAgentConfig(
+        model="gpt-4o-mini",
+        mcp_servers=[
+            MCPServerConfig(
+                name="env_server",
+                transport="stdio",
+                command="node",
+                args=["server.js"],
+                env={"API_KEY": "secret123", "DEBUG": "1"},
+            )
+        ],
+    )
+    save_config(cfg, cfg_file)
+
+    reloaded = load_config(config_path=cfg_file)
+    assert len(reloaded.mcp_servers) == 1
+    assert reloaded.mcp_servers[0].name == "env_server"
+    assert reloaded.mcp_servers[0].env == {"API_KEY": "secret123", "DEBUG": "1"}
+
+

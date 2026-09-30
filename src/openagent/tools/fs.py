@@ -209,6 +209,8 @@ class EditFileTool(BaseFSTool):
 
         if not path:
             return ToolResult(call_id=call_id, output="Parameter 'path' is required.", is_error=True)
+        if not old_str:
+            return ToolResult(call_id=call_id, output="Parameter 'old_str' cannot be empty.", is_error=True)
 
         try:
             target = self._resolve(path)
@@ -463,6 +465,11 @@ class GrepSearchTool(BaseFSTool):
 
         for f in target_files:
             if not f.is_file():
+                continue
+            try:
+                if not f.resolve().is_relative_to(self.workspace_root):
+                    continue
+            except Exception:
                 continue
             try:
                 content = f.read_text(encoding="utf-8", errors="ignore")

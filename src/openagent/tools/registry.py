@@ -145,10 +145,12 @@ class ToolRegistry:
 
         kwargs: dict[str, Any] = dict(call.arguments)
         try:
-            try:
-                res = await tool.execute(call_id=call.id, **kwargs)
-            except TypeError:
-                res = await tool.execute(**kwargs)
+            sig = inspect.signature(tool.execute)
+            if "call_id" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                kwargs["call_id"] = call.id
+            res = await tool.execute(**kwargs)
         except Exception as exc:
             return ToolResult(
                 call_id=call.id,

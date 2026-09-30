@@ -22,11 +22,10 @@ MAX_OUTPUT_BYTES = 100 * 1024  # 100 KB cap
 
 def _truncate_output(text: str, cap: int = MAX_OUTPUT_BYTES) -> str:
     """Cap output string to limit and append truncation indicator if exceeded."""
-    if len(text.encode("utf-8", errors="replace")) <= cap:
+    raw_bytes = text.encode("utf-8", errors="replace")
+    if len(raw_bytes) <= cap:
         return text
-    truncated = text[:cap]
-    while len(truncated.encode("utf-8", errors="replace")) > cap and truncated:
-        truncated = truncated[:-10]
+    truncated = raw_bytes[:cap].decode("utf-8", errors="ignore")
     return f"{truncated}\n... [Output truncated at 100KB]"
 
 
@@ -80,7 +79,11 @@ class ShellTool(Tool):
         # Determine effective working directory
         work_dir: Path | None = None
         if cwd is not None:
-            work_dir = Path(cwd).resolve()
+            target_cwd = Path(cwd)
+            if not target_cwd.is_absolute() and self.workspace_root is not None:
+                work_dir = (self.workspace_root / target_cwd).resolve()
+            else:
+                work_dir = target_cwd.resolve()
         elif self.workspace_root is not None:
             work_dir = self.workspace_root
 
@@ -147,6 +150,8 @@ class ShellTool(Tool):
             )
         except TimeoutError:
             with contextlib.suppress(Exception):
+                if sys.platform == "win32" and proc.pid:
+                    os.system(f"taskkill /F /T /PID {proc.pid} >nul 2>&1")
                 proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
@@ -158,10 +163,6 @@ class ShellTool(Tool):
 
         stdout_text = stdout_bytes.decode(sys.getdefaultencoding(), errors="replace")
         stderr_text = stderr_bytes.decode(sys.getdefaultencoding(), errors="replace")
-
-        # Bound output
-        stdout_text = _truncate_output(stdout_text)
-        stderr_text = _truncate_output(stderr_text)
 
         returncode = proc.returncode if proc.returncode is not None else -1
         is_error = returncode != 0
@@ -179,6 +180,8 @@ class ShellTool(Tool):
                 pieces.append(f"Stderr:\n{stderr_text.strip()}")
             output = "\n".join(pieces)
 
+        # Bound total combined output string
+        output = _truncate_output(output, cap=MAX_OUTPUT_BYTES)
         return ToolResult(call_id=call_id, output=output, is_error=is_error)
 
 

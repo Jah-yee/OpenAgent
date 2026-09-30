@@ -516,3 +516,81 @@ async def test_web_fetch_tool_http_error() -> None:
         res = await web.execute(url="https://example.com/notfound")
         assert res.is_error
         assert "404" in res.output
+
+
+@pytest.mark.asyncio
+async def test_fs_symlink_confinement(tmp_path: Path) -> None:
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    secret_file = outside_dir / "secret.txt"
+    secret_file.write_text("SUPER_SECRET_TOKEN=xyz123", encoding="utf-8")
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    symlink_file = ws / "symlink_secret.txt"
+
+    try:
+        symlink_file.symlink_to(secret_file)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported in current environment/permissions")
+
+    tools_map = {t.name: t for t in create_fs_tools(ws)}
+    read_tool = tools_map["read_file"]
+    grep_tool = tools_map["grep_search"]
+
+    # 1. read_file through external symlink must fail
+    res_read = await read_tool.execute(path="symlink_secret.txt")
+    assert res_read.is_error
+    assert "access denied" in res_read.output.lower() or "outside" in res_read.output.lower()
+
+    # 2. grep_search must ignore the external symlinked file and NOT leak contents
+    res_grep = await grep_tool.execute(query="SUPER_SECRET_TOKEN")
+    assert "SUPER_SECRET_TOKEN" not in res_grep.output
+    assert res_grep.output == "No matches found for query."
+
+
+@pytest.mark.asyncio
+async def test_fs_edit_file_empty_old_str(sandbox_env: tuple[Path, dict[str, Tool]]) -> None:
+    _ws, tools = sandbox_env
+    edit_tool = tools["edit_file"]
+    res = await edit_tool.execute(path="test.txt", old_str="", new_str="something")
+    assert res.is_error
+    assert "cannot be empty" in res.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_type_error_no_double_call() -> None:
+    class FailingTool(Tool):
+        name = "fail_type_error"
+        description = "Raises TypeError internally"
+        call_count = 0
+
+        async def execute(self, **kwargs: Any) -> ToolResult:
+            self.call_count += 1
+            # Raise an internal TypeError
+            _ = None + 1  # type: ignore[operator]
+            return ToolResult(call_id=str(kwargs.get("call_id", "")), output="ok")
+
+    tool = FailingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+
+    call = ToolCall(id="call_1", name="fail_type_error", arguments={})
+    res = await registry.execute_call(call)
+
+    assert res.is_error
+    assert "Error executing tool" in res.output
+    # Must only be called once, NOT retried!
+    assert tool.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_relative_cwd(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    subdir = ws / "sub"
+    subdir.mkdir(parents=True)
+
+    shell = ShellTool(workspace_root=ws)
+    res = await shell.execute(command="echo inside_cwd", cwd="sub")
+    assert not res.is_error
+    assert "inside_cwd" in res.output

@@ -30,51 +30,26 @@ class SSEvent:
     retry: int | None = None
 
 
-def decode_sse_lines(lines: Iterator[str]) -> Iterator[SSEvent]:
-    """Fold a stream of raw lines into events.
+class SSEDecoder:
+    """Stateful SSE line parser."""
 
-    Spec-driven: fields are ``field: value``, a blank line dispatches the
-    buffer, and multiple ``data:`` lines are joined with newlines per the SSE
-    specification.
-    """
-    event_name = "message"
-    data_lines: list[str] = []
-    event_id: str | None = None
-    retry: int | None = None
+    def __init__(self) -> None:
+        self.event_name = "message"
+        self.data_lines: list[str] = []
+        self.event_id: str | None = None
+        self.retry: int | None = None
 
-    def flush() -> SSEvent | None:
-        nonlocal event_name, data_lines, event_id, retry
-        if not data_lines and event_name == "message" and event_id is None:
-            return None
-        evt = SSEvent(
-            event=event_name,
-            data="\n".join(data_lines),
-            id=event_id,
-            retry=retry,
-        )
-        event_name = "message"
-        data_lines = []
-        event_id = None
-        retry = None
-        return evt
-
-    for raw in lines:
-        line = raw.rstrip("\n").rstrip("\r")
+    def decode_line(self, raw: str) -> SSEvent | None:
+        line = raw.rstrip("\r\n")
 
         if not line:
-            # Blank line: dispatch. Comment-only keep-alives produce nothing.
-            evt = flush()
-            if evt is not None and evt.data.strip():
-                yield evt
-            continue
+            return self.flush()
 
         if line.startswith(":"):
-            # Comment / heartbeat (": ping").
-            continue
+            return None
 
         if ":" not in line:
-            # A bare field name with no value is legal but useless.
-            continue
+            return None
 
         field_name, _, value = line.partition(":")
         if value.startswith(" "):
@@ -82,23 +57,52 @@ def decode_sse_lines(lines: Iterator[str]) -> Iterator[SSEvent]:
 
         match field_name:
             case "event":
-                event_name = value
+                self.event_name = value
             case "data":
-                data_lines.append(value)
+                self.data_lines.append(value)
             case "id":
-                event_id = value
+                self.event_id = value
             case "retry":
                 try:
-                    retry = int(value)
+                    self.retry = int(value)
                 except ValueError:
-                    retry = None
+                    self.retry = None
             case _:
-                continue
+                pass
+        return None
 
-    # Flush a trailing event that arrived without a final blank line.
-    evt = flush()
-    if evt is not None and evt.data.strip():
-        yield evt
+    def flush(self) -> SSEvent | None:
+        if not self.data_lines and self.event_name == "message" and self.event_id is None:
+            return None
+        evt = SSEvent(
+            event=self.event_name,
+            data="\n".join(self.data_lines),
+            id=self.event_id,
+            retry=self.retry,
+        )
+        self.event_name = "message"
+        self.data_lines = []
+        self.event_id = None
+        self.retry = None
+        return evt
+
+
+def decode_sse_lines(lines: Iterator[str]) -> Iterator[SSEvent]:
+    """Fold a stream of raw lines into events.
+
+    Spec-driven: fields are ``field: value``, a blank line dispatches the
+    buffer, and multiple ``data:`` lines are joined with newlines per the SSE
+    specification.
+    """
+    decoder = SSEDecoder()
+    for raw in lines:
+        evt = decoder.decode_line(raw)
+        if evt is not None and evt.data.strip():
+            yield evt
+
+    trailing = decoder.flush()
+    if trailing is not None and trailing.data.strip():
+        yield trailing
 
 
 async def iter_sse(response: httpx.Response) -> AsyncIterator[SSEvent]:
@@ -107,13 +111,15 @@ async def iter_sse(response: httpx.Response) -> AsyncIterator[SSEvent]:
     ``response.aiter_lines`` is used rather than ``iter_bytes`` so the framing
     is handled by the HTTP layer rather than by us.
     """
-    async for event in decode_sse_lines(_async_to_sync_lines(response)):
-        yield event
+    decoder = SSEDecoder()
+    async for raw in response.aiter_lines():
+        evt = decoder.decode_line(raw)
+        if evt is not None and evt.data.strip():
+            yield evt
 
-
-async def _async_to_sync_lines(response: httpx.Response) -> AsyncIterator[str]:
-    async for line in response.aiter_lines():
-        yield line
+    trailing = decoder.flush()
+    if trailing is not None and trailing.data.strip():
+        yield trailing
 
 
 def parse_json_payload(text: str, *, provider: str = "") -> Any:

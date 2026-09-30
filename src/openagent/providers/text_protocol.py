@@ -145,6 +145,11 @@ class _StreamingParser:
         self._calls: list[ToolCall] = []
         self._emitted_upto = 0
 
+    def consume(self, text: str) -> _StreamingParser:
+        """Consume input text incrementally, returning self for chaining."""
+        self.feed(text)
+        return self
+
     def feed(self, text: str) -> list[ToolCall]:
         """Consume a chunk, returning any tool calls that completed."""
         self._buffer += text
@@ -153,13 +158,13 @@ class _StreamingParser:
         self._calls.extend(calls)
         return calls
 
-    def finish(self) -> list[ToolCall]:
-        """Flush trailing content and return all collected calls."""
+    def finish(self) -> tuple[list[ToolCall], str]:
+        """Flush trailing content and return (calls, remaining_text)."""
         if self._buffer.strip():
             calls, remaining = self._consume_complete(self._buffer, force=True)
             self._calls.extend(calls)
             self._buffer = remaining
-        return self._calls
+        return self._calls, self._buffer
 
     @property
     def pending_text(self) -> str:
@@ -185,7 +190,7 @@ class _StreamingParser:
                 tail = remainder[marker.end() :]
                 # The line form runs until a blank line or a terminator.
                 stop = len(tail)
-                for terminator in ("\n\n", self.line_marker, self.block_open):
+                for terminator in ("\n\n", self._codec.line_marker, self._codec.block_open):
                     idx = tail.find(terminator)
                     if idx != -1:
                         stop = min(stop, idx)

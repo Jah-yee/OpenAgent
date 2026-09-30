@@ -160,7 +160,7 @@ class HttpTransport:
         path: str,
         payload: Mapping[str, Any],
         headers: Mapping[str, str] | None = None,
-    ) -> AsyncIterator[httpx.Response]:
+    ) -> httpx.Response:
         """POST and yield the still-open response for incremental decoding.
 
         No retry here: by the time the stream is open we may already have
@@ -188,6 +188,18 @@ class HttpTransport:
             raise classify(response.status_code, info, provider=self.provider)
 
         return response
+
+    async def post_stream(
+        self,
+        path: str,
+        json: Mapping[str, Any] | None = None,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """Stream POST a request, returning the open response object."""
+        body = json if json is not None else (payload or {})
+        return await self.stream_post(path, body, headers=headers)
 
     async def get_json(
         self,

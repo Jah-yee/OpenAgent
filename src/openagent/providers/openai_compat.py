@@ -52,6 +52,7 @@ from ..core.types import (
     Usage,
 )
 from ..utils.http import HttpTransport
+from ..utils.sse import SSEvent
 from .text_protocol import TextToolCodec
 
 #: Substrings identifying reasoning models that reject sampling parameters.
@@ -311,7 +312,7 @@ class OpenAICompatProvider(ChatProvider):
         text_protocol_calls: list[ToolCall] = []
 
         # Partial tool calls keyed by streaming index.
-        partials: dict[int, dict[str, Any]] = {}
+        partials: dict[int, dict[str, str]] = {}
         decoder = _IncrementalJSONDecoder()
         codec_stream = self._codec.parse_stream() if use_text_protocol else None
 
@@ -319,6 +320,8 @@ class OpenAICompatProvider(ChatProvider):
             async for event in _iter_openai_sse(response):
                 if event.event not in ("message", ""):
                     continue
+                if event.data.strip() == "[DONE]":
+                    break
                 try:
                     chunk = json.loads(event.data)
                 except json.JSONDecodeError:
@@ -345,12 +348,10 @@ class OpenAICompatProvider(ChatProvider):
                                 p.get("text", "") for p in content if isinstance(p, dict)
                             )
                         if content:
-                            text_parts.append(content)
                             if codec_stream is not None:
-                                chunk_out = codec_stream.feed(content)
-                                text_parts = [t for t in text_parts if t != content]
-                                text_parts.extend(chunk_out or ())
+                                codec_stream.feed(content)
                                 continue
+                            text_parts.append(content)
                             yield TextDelta(text=content)
 
                     for raw_call in delta.get("tool_calls") or ():
@@ -369,8 +370,12 @@ class OpenAICompatProvider(ChatProvider):
                             slot["id"] = call_id
 
             if codec_stream is not None:
-                text_protocol_calls = codec_stream.finish()
+                text_protocol_calls, remaining_text = codec_stream.finish()
+                if remaining_text:
+                    text_parts.append(remaining_text)
+                    yield TextDelta(text=remaining_text)
 
+            final_tool_calls: list[ToolCall] = []
             for index, slot in sorted(partials.items()):
                 try:
                     arguments = coerce_arguments(decoder.decode(slot["args"]))
@@ -383,13 +388,14 @@ class OpenAICompatProvider(ChatProvider):
                     id=slot["id"] or f"call_{index}",
                     raw_arguments=slot["args"] or "{}",
                 )
+                final_tool_calls.append(call)
                 yield ToolCallEnd(index=index, call=call)
 
             for call in text_protocol_calls:
-                yield ToolCallEnd(index=len(partials), call=call)
-                partials[len(partials)] = {"id": call.id, "name": call.name, "args": ""}
+                yield ToolCallEnd(index=len(final_tool_calls), call=call)
+                final_tool_calls.append(call)
 
-            if not text_protocol_calls and text_parts:
+            if not final_tool_calls and text_parts:
                 yield TextDelta(text="")
 
         except ProviderError as exc:
@@ -406,11 +412,7 @@ class OpenAICompatProvider(ChatProvider):
             usage=usage,
             message=Message.assistant(
                 "".join(text_parts),
-                tool_calls=(list(partials.values()) and [
-                    ToolCall(name=s["name"], arguments=coerce_arguments(s["args"]), id=s["id"])
-                    for s in partials.values()
-                ])
-                or [],
+                tool_calls=final_tool_calls,
                 reasoning="".join(reasoning_parts) or None,
             ),
         )
@@ -478,30 +480,52 @@ class _IncrementalJSONDecoder:
         return self._buffer[:end] or self._buffer
 
 
-async def _iter_openai_sse(response: Any) -> AsyncIterator[Any]:
+async def _iter_openai_sse(response: Any) -> AsyncIterator[SSEvent]:
     """Yield decoded SSE events, tolerating servers that ignore SSE framing.
 
     A few OpenAI-compatible servers answer with a plain JSON array or one JSON
     object per line instead of ``data:`` lines; both are handled so a
     non-conforming gateway still works.
     """
-    from ..utils.sse import SSEvent, decode_sse_lines
+    from ..utils.sse import SSEDecoder, iter_sse
 
-    saw_sse_prefix = False
+    headers = getattr(response, "headers", {})
+    content_type = ""
+    if isinstance(headers, Mapping):
+        content_type = headers.get("content-type", "")
+
+    if "text/event-stream" in content_type:
+        async for event in iter_sse(response):
+            yield event
+        return
+
+    decoder = SSEDecoder()
+    saw_sse = False
     buffer: list[str] = []
 
     async for line in response.aiter_lines():
-        if line.startswith("data:") or line.startswith("event:") or line.startswith(":"):
-            saw_sse_prefix = True
-        buffer.append(line)
+        if not saw_sse:
+            if line.startswith(("data:", "event:", ":")):
+                saw_sse = True
+            elif line.strip() != "":
+                buffer.append(line)
+                continue
 
-        if line.strip() == "" and not saw_sse_prefix:
-            # A blank line with no SSE markers: this was a raw JSON body.
-            pass
+        if saw_sse:
+            if buffer:
+                for prev in buffer:
+                    evt = decoder.decode_line(prev)
+                    if evt is not None and evt.data.strip():
+                        yield evt
+                buffer.clear()
+            evt = decoder.decode_line(line)
+            if evt is not None and evt.data.strip():
+                yield evt
 
-    if saw_sse_prefix:
-        for event in decode_sse_lines(iter(buffer)):
-            yield event
+    if saw_sse:
+        trailing = decoder.flush()
+        if trailing is not None and trailing.data.strip():
+            yield trailing
         return
 
     # Fallback: try to interpret the whole payload as one JSON document, then

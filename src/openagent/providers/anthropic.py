@@ -41,6 +41,7 @@ from ..core.types import (
     Usage,
 )
 from ..utils.http import HttpTransport
+from ..utils.sse import iter_sse
 
 API_VERSION = "2023-06-01"
 
@@ -230,7 +231,7 @@ class AnthropicProvider(ChatProvider):
         usage = Usage()
 
         try:
-            async for event in _iter_sse(response):
+            async for event in iter_sse(response):
                 if event.data == "[DONE]":
                     break
                 try:
@@ -245,9 +246,9 @@ class AnthropicProvider(ChatProvider):
                     case "message_start":
                         msg_usage = (data.get("message") or {}).get("usage") or {}
                         usage = Usage(
-                            prompt_tokens=msg_usage.get("input_tokens", 0),
-                            completion_tokens=msg_usage.get("output_tokens", 0),
-                            cached_tokens=msg_usage.get("cache_read_input_tokens", 0),
+                            prompt_tokens=int(msg_usage.get("input_tokens", 0)),
+                            completion_tokens=int(msg_usage.get("output_tokens", 0)),
+                            cached_tokens=int(msg_usage.get("cache_read_input_tokens", 0)),
                         )
 
                     case "content_block_start":
@@ -300,10 +301,9 @@ class AnthropicProvider(ChatProvider):
                             stop_reason = stop
                         if delta_usage := data.get("usage"):
                             usage = Usage(
-                                prompt_tokens=usage.input_tokens
-                                if "input_tokens" in usage
-                                else usage.prompt_tokens,
-                                completion_tokens=delta_usage.get("output_tokens", usage.completion_tokens),
+                                prompt_tokens=usage.prompt_tokens,
+                                completion_tokens=int(delta_usage.get("output_tokens", usage.completion_tokens)),
+                                cached_tokens=usage.cached_tokens,
                             )
 
                     case "message_stop":
@@ -393,16 +393,6 @@ def _map_stop(stop_reason: str, has_tool_calls: bool) -> FinishReason:
         case _:
             return FinishReason.UNKNOWN
 
-
-async def _iter_sse(response: Any) -> AsyncIterator[Any]:
-    from ..utils.sse import decode_sse_lines
-
-    async def gen() -> AsyncIterator[str]:
-        async for line in response.aiter_lines():
-            yield line
-
-    for event in decode_sse_lines(gen()):
-        yield event
 
 
 def blocks_to_text(blocks: Sequence[Mapping[str, Any]]) -> str:

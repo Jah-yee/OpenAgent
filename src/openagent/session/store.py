@@ -323,6 +323,8 @@ class SessionStore:
                 for msg in messages:
                     msg_dict = self._serialize_message(msg)
                     f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, target_path)
         except Exception:
             if tmp_path.exists():

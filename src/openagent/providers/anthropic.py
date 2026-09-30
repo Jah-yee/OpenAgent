@@ -24,6 +24,8 @@ from ..core.events import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolCallDelta,
+    ToolCallEnd,
     ToolCallStart,
     UsageEvent,
 )
@@ -216,135 +218,139 @@ class AnthropicProvider(ChatProvider):
             yield ErrorEvent(error=exc)
             return
 
-        yield StartEvent(model=request.model, provider=self.name)
-
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        calls: list[ToolCall] = []
-        # Tool blocks stream in three phases: start (id/name), delta (args),
-        # stop. These tables live in this scope on purpose — module-level state
-        # would be shared across concurrent sessions.
-        partial_args: dict[int, str] = {}
-        pending_names: dict[int, str] = {}
-        pending_ids: dict[int, str] = {}
-        stop_reason = "end_turn"
-        usage = Usage()
-
         try:
-            async for event in iter_sse(response):
-                if event.data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(event.data)
-                except json.JSONDecodeError:
-                    continue
+            yield StartEvent(model=request.model, provider=self.name)
 
-                kind = chunk.get("type")
-                data = chunk.get("data") if isinstance(chunk.get("data"), dict) else chunk
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            calls: list[ToolCall] = []
+            # Tool blocks stream in three phases: start (id/name), delta (args),
+            # stop. These tables live in this scope on purpose — module-level state
+            # would be shared across concurrent sessions.
+            partial_args: dict[int, str] = {}
+            pending_names: dict[int, str] = {}
+            pending_ids: dict[int, str] = {}
+            stop_reason = "end_turn"
+            usage = Usage()
 
-                match kind:
-                    case "message_start":
-                        msg_usage = (data.get("message") or {}).get("usage") or {}
-                        usage = Usage(
-                            prompt_tokens=int(msg_usage.get("input_tokens", 0)),
-                            completion_tokens=int(msg_usage.get("output_tokens", 0)),
-                            cached_tokens=int(msg_usage.get("cache_read_input_tokens", 0)),
-                        )
+            try:
+                async for event in iter_sse(response):
+                    if event.data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(event.data)
+                    except json.JSONDecodeError:
+                        continue
 
-                    case "content_block_start":
-                        block = data.get("content_block") or {}
-                        if block.get("type") == "tool_use":
-                            block_index = data.get("index", len(partial_args))
-                            partial_args[block_index] = ""
-                            pending_names[block_index] = block.get("name", "")
-                            pending_ids[block_index] = block.get("id", "") or f"call_{block_index}"
-                            yield ToolCallStart(
-                                index=block_index,
-                                id=pending_ids[block_index],
-                                name=pending_names[block_index],
+                    kind = chunk.get("type")
+                    data = chunk.get("data") if isinstance(chunk.get("data"), dict) else chunk
+
+                    match kind:
+                        case "message_start":
+                            msg_usage = (data.get("message") or {}).get("usage") or {}
+                            usage = Usage(
+                                prompt_tokens=int(msg_usage.get("input_tokens", 0)),
+                                completion_tokens=int(msg_usage.get("output_tokens", 0)),
+                                cached_tokens=int(msg_usage.get("cache_read_input_tokens", 0)),
                             )
 
-                    case "content_block_delta":
-                        delta = data.get("delta") or {}
-                        block_index = data.get("index", 0)
-                        match delta.get("type"):
-                            case "text_delta":
-                                chunk_text = delta.get("text", "")
-                                text_parts.append(chunk_text)
-                                yield TextDelta(text=chunk_text)
-                            case "thinking_delta":
-                                chunk_text = delta.get("thinking", "")
-                                reasoning_parts.append(chunk_text)
-                                yield ThinkingDelta(text=chunk_text)
-                            case "input_json_delta":
-                                partial_args[block_index] = partial_args.get(block_index, "") + delta.get(
-                                    "partial_json", ""
+                        case "content_block_start":
+                            block = data.get("content_block") or {}
+                            if block.get("type") == "tool_use":
+                                block_index = data.get("index", len(partial_args))
+                                partial_args[block_index] = ""
+                                pending_names[block_index] = block.get("name", "")
+                                pending_ids[block_index] = block.get("id", "") or f"call_{block_index}"
+                                yield ToolCallStart(
+                                    index=block_index,
+                                    id=pending_ids[block_index],
+                                    name=pending_names[block_index],
                                 )
-                            case "signature_delta":
-                                pass  # carried in the final message only
 
-                    case "content_block_stop":
-                        block_index = data.get("index", 0)
-                        if block_index in partial_args:
-                            calls.append(
-                                _finalise_call(
+                        case "content_block_delta":
+                            delta = data.get("delta") or {}
+                            block_index = data.get("index", 0)
+                            match delta.get("type"):
+                                case "text_delta":
+                                    chunk_text = delta.get("text", "")
+                                    text_parts.append(chunk_text)
+                                    yield TextDelta(text=chunk_text)
+                                case "thinking_delta":
+                                    chunk_text = delta.get("thinking", "")
+                                    reasoning_parts.append(chunk_text)
+                                    yield ThinkingDelta(text=chunk_text)
+                                case "input_json_delta":
+                                    json_delta = delta.get("partial_json", "")
+                                    partial_args[block_index] = partial_args.get(block_index, "") + json_delta
+                                    yield ToolCallDelta(index=block_index, arguments_delta=json_delta)
+                                case "signature_delta":
+                                    pass  # carried in the final message only
+
+                        case "content_block_stop":
+                            block_index = data.get("index", 0)
+                            if block_index in partial_args:
+                                call = _finalise_call(
                                     partial_args.pop(block_index),
                                     block_index,
                                     pending_names.pop(block_index, ""),
                                     pending_ids.pop(block_index, f"call_{block_index}"),
                                 )
-                            )
+                                calls.append(call)
+                                yield ToolCallEnd(index=block_index, call=call)
 
-                    case "message_delta":
-                        delta = data.get("delta") or {}
-                        if stop := delta.get("stop_reason"):
-                            stop_reason = stop
-                        if delta_usage := data.get("usage"):
-                            usage = Usage(
-                                prompt_tokens=usage.prompt_tokens,
-                                completion_tokens=int(delta_usage.get("output_tokens", usage.completion_tokens)),
-                                cached_tokens=usage.cached_tokens,
-                            )
+                        case "message_delta":
+                            delta = data.get("delta") or {}
+                            if stop := delta.get("stop_reason"):
+                                stop_reason = stop
+                            if delta_usage := data.get("usage"):
+                                usage = Usage(
+                                    prompt_tokens=usage.prompt_tokens,
+                                    completion_tokens=int(delta_usage.get("output_tokens", usage.completion_tokens)),
+                                    cached_tokens=usage.cached_tokens,
+                                )
 
-                    case "message_stop":
-                        pass
+                        case "message_stop":
+                            pass
 
-                    case "error":
-                        err = data.get("error") or {}
-                        yield ErrorEvent(error=ProviderError(err.get("message", "stream error")))
-                        return
+                        case "error":
+                            err = data.get("error") or {}
+                            yield ErrorEvent(error=ProviderError(err.get("message", "stream error")))
+                            return
 
-                    case _:
-                        continue
+                        case _:
+                            continue
 
-        except ProviderError as exc:
-            yield ErrorEvent(error=exc, retryable=exc.retryable)
-            return
-        except Exception as exc:
-            yield ErrorEvent(error=exc)
-            return
+            except ProviderError as exc:
+                yield ErrorEvent(error=exc, retryable=exc.retryable)
+                return
+            except Exception as exc:
+                yield ErrorEvent(error=exc)
+                return
 
-        # A tool block may be open at the moment the stream ends.
-        for block_index, raw in sorted(partial_args.items()):
-            calls.append(
-                _finalise_call(
+            # A tool block may be open at the moment the stream ends.
+            for block_index, raw in sorted(partial_args.items()):
+                call = _finalise_call(
                     raw,
                     block_index,
                     pending_names.get(block_index, ""),
                     pending_ids.get(block_index, f"call_{block_index}"),
                 )
-            )
+                calls.append(call)
+                yield ToolCallEnd(index=block_index, call=call)
+            partial_args.clear()
 
-        yield UsageEvent(usage=usage)
-        yield DoneEvent(
-            finish_reason=_map_stop(stop_reason, bool(calls)),
-            usage=usage,
-            message=Message.assistant(
-                "".join(text_parts),
-                tool_calls=calls,
-                reasoning="".join(reasoning_parts) or None,
-            ),
-        )
+            yield UsageEvent(usage=usage)
+            yield DoneEvent(
+                finish_reason=_map_stop(stop_reason, bool(calls)),
+                usage=usage,
+                message=Message.assistant(
+                    "".join(text_parts),
+                    tool_calls=calls,
+                    reasoning="".join(reasoning_parts) or None,
+                ),
+            )
+        finally:
+            await response.aclose()
 
     async def list_models(self) -> list[ModelInfo]:
         body = await self._transport.get_json("/v1/models")

@@ -299,123 +299,126 @@ class OpenAICompatProvider(ChatProvider):
             yield ErrorEvent(error=exc)
             return
 
-        use_text_protocol = (
-            bool(request.tools) and self.tool_protocol == ToolProtocol.TEXT
-        )
-
-        yield StartEvent(model=request.model, provider=self.name)
-
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        usage = Usage()
-        finish_reason = "stop"
-        text_protocol_calls: list[ToolCall] = []
-
-        # Partial tool calls keyed by streaming index.
-        partials: dict[int, dict[str, str]] = {}
-        decoder = _IncrementalJSONDecoder()
-        codec_stream = self._codec.parse_stream() if use_text_protocol else None
-
         try:
-            async for event in _iter_openai_sse(response):
-                if event.event not in ("message", ""):
-                    continue
-                if event.data.strip() == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(event.data)
-                except json.JSONDecodeError:
-                    continue
+            use_text_protocol = (
+                bool(request.tools) and self.tool_protocol == ToolProtocol.TEXT
+            )
 
-                if usage_payload := chunk.get("usage"):
-                    usage = _parse_usage(usage_payload)
+            yield StartEvent(model=request.model, provider=self.name)
 
-                for choice in chunk.get("choices") or ():
-                    if reason := choice.get("finish_reason"):
-                        finish_reason = reason
-                    delta = choice.get("delta") or choice.get("message") or {}
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            usage = Usage()
+            finish_reason = "stop"
+            text_protocol_calls: list[ToolCall] = []
 
-                    if reasoning_text := delta.get("reasoning_content") or delta.get(
-                        "reasoning"
-                    ):
-                        reasoning_parts.append(reasoning_text)
-                        yield ThinkingDelta(text=reasoning_text)
+            # Partial tool calls keyed by streaming index.
+            partials: dict[int, dict[str, str]] = {}
+            decoder = _IncrementalJSONDecoder()
+            codec_stream = self._codec.parse_stream() if use_text_protocol else None
 
-                    if content := delta.get("content"):
-                        if isinstance(content, list):
-                            # Some gateways return content parts even when streaming.
-                            content = "".join(
-                                p.get("text", "") for p in content if isinstance(p, dict)
-                            )
-                        if content:
-                            if codec_stream is not None:
-                                codec_stream.feed(content)
-                                continue
-                            text_parts.append(content)
-                            yield TextDelta(text=content)
+            try:
+                async for event in _iter_openai_sse(response):
+                    if event.event not in ("message", ""):
+                        continue
+                    if event.data.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(event.data)
+                    except json.JSONDecodeError:
+                        continue
 
-                    for raw_call in delta.get("tool_calls") or ():
-                        index = int(raw_call.get("index", len(partials)))
-                        slot = partials.setdefault(index, {"id": "", "name": "", "args": ""})
+                    if usage_payload := chunk.get("usage"):
+                        usage = _parse_usage(usage_payload)
 
-                        if fn := raw_call.get("function"):
-                            if fn_name := fn.get("name"):
-                                if not slot["name"]:
-                                    yield ToolCallStart(index=index, name=fn_name, id=slot["id"])
-                                slot["name"] += fn_name
-                            if args_delta := fn.get("arguments"):
-                                slot["args"] += args_delta
-                                yield ToolCallDelta(index=index, arguments_delta=args_delta)
-                        if call_id := raw_call.get("id"):
-                            slot["id"] = call_id
+                    for choice in chunk.get("choices") or ():
+                        if reason := choice.get("finish_reason"):
+                            finish_reason = reason
+                        delta = choice.get("delta") or choice.get("message") or {}
 
-            if codec_stream is not None:
-                text_protocol_calls, remaining_text = codec_stream.finish()
-                if remaining_text:
-                    text_parts.append(remaining_text)
-                    yield TextDelta(text=remaining_text)
+                        if reasoning_text := delta.get("reasoning_content") or delta.get(
+                            "reasoning"
+                        ):
+                            reasoning_parts.append(reasoning_text)
+                            yield ThinkingDelta(text=reasoning_text)
 
-            final_tool_calls: list[ToolCall] = []
-            for index, slot in sorted(partials.items()):
-                try:
-                    arguments = coerce_arguments(decoder.decode(slot["args"]))
-                except ProviderError as exc:
-                    yield ErrorEvent(error=exc)
-                    return
-                call = ToolCall(
-                    name=slot["name"],
-                    arguments=arguments,
-                    id=slot["id"] or f"call_{index}",
-                    raw_arguments=slot["args"] or "{}",
-                )
-                final_tool_calls.append(call)
-                yield ToolCallEnd(index=index, call=call)
+                        if content := delta.get("content"):
+                            if isinstance(content, list):
+                                # Some gateways return content parts even when streaming.
+                                content = "".join(
+                                    p.get("text", "") for p in content if isinstance(p, dict)
+                                )
+                            if content:
+                                if codec_stream is not None:
+                                    codec_stream.feed(content)
+                                    continue
+                                text_parts.append(content)
+                                yield TextDelta(text=content)
 
-            for call in text_protocol_calls:
-                yield ToolCallEnd(index=len(final_tool_calls), call=call)
-                final_tool_calls.append(call)
+                        for raw_call in delta.get("tool_calls") or ():
+                            index = int(raw_call.get("index", len(partials)))
+                            slot = partials.setdefault(index, {"id": "", "name": "", "args": ""})
 
-            if not final_tool_calls and text_parts:
-                yield TextDelta(text="")
+                            if fn := raw_call.get("function"):
+                                if fn_name := fn.get("name"):
+                                    if not slot["name"]:
+                                        yield ToolCallStart(index=index, name=fn_name, id=slot["id"])
+                                    slot["name"] += fn_name
+                                if args_delta := fn.get("arguments"):
+                                    slot["args"] += args_delta
+                                    yield ToolCallDelta(index=index, arguments_delta=args_delta)
+                            if call_id := raw_call.get("id"):
+                                slot["id"] = call_id
 
-        except ProviderError as exc:
-            yield ErrorEvent(error=exc, retryable=exc.retryable)
-            return
-        except Exception as exc:
-            yield ErrorEvent(error=exc)
-            return
+                if codec_stream is not None:
+                    text_protocol_calls, remaining_text = codec_stream.finish()
+                    if remaining_text:
+                        text_parts.append(remaining_text)
+                        yield TextDelta(text=remaining_text)
 
-        from ..core.types import Message
+                final_tool_calls: list[ToolCall] = []
+                for index, slot in sorted(partials.items()):
+                    try:
+                        arguments = coerce_arguments(decoder.decode(slot["args"]))
+                    except ProviderError as exc:
+                        yield ErrorEvent(error=exc)
+                        return
+                    call = ToolCall(
+                        name=slot["name"],
+                        arguments=arguments,
+                        id=slot["id"] or f"call_{index}",
+                        raw_arguments=slot["args"] or "{}",
+                    )
+                    final_tool_calls.append(call)
+                    yield ToolCallEnd(index=index, call=call)
 
-        yield DoneEvent(
-            finish_reason=_map_finish(finish_reason),
-            usage=usage,
-            message=Message.assistant(
-                "".join(text_parts),
-                tool_calls=final_tool_calls,
-                reasoning="".join(reasoning_parts) or None,
-            ),
-        )
+                for call in text_protocol_calls:
+                    yield ToolCallEnd(index=len(final_tool_calls), call=call)
+                    final_tool_calls.append(call)
+
+                if not final_tool_calls and text_parts:
+                    yield TextDelta(text="")
+
+            except ProviderError as exc:
+                yield ErrorEvent(error=exc, retryable=exc.retryable)
+                return
+            except Exception as exc:
+                yield ErrorEvent(error=exc)
+                return
+
+            from ..core.types import Message
+
+            yield DoneEvent(
+                finish_reason=_map_finish(finish_reason),
+                usage=usage,
+                message=Message.assistant(
+                    "".join(text_parts),
+                    tool_calls=final_tool_calls,
+                    reasoning="".join(reasoning_parts) or None,
+                ),
+            )
+        finally:
+            await response.aclose()
 
     # -- discovery ---------------------------------------------------------- #
 

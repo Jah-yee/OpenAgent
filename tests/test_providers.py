@@ -130,7 +130,7 @@ def test_text_tool_codec_line_syntax() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_compat_provider_streaming() -> None:
+async def test_openai_compat_provider_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = OpenAICompatProvider(
         base_url="https://api.openai.com/v1",
         model="gpt-4o",
@@ -158,7 +158,7 @@ async def test_openai_compat_provider_streaming() -> None:
         'data: [DONE]',
     ]
     mock_resp = make_sse_response(sse_data)
-    provider.transport.stream_post = AsyncMock(return_value=mock_resp)
+    monkeypatch.setattr(provider.transport, "stream_post", AsyncMock(return_value=mock_resp))
 
     req = ChatRequest(
         model="gpt-4o",
@@ -182,13 +182,15 @@ async def test_openai_compat_provider_streaming() -> None:
     assert done.finish_reason == FinishReason.TOOL_CALLS
     assert done.usage.prompt_tokens == 10
     assert done.usage.completion_tokens == 20
+    assert done.message is not None
     assert len(done.message.tool_calls) == 1
     assert done.message.tool_calls[0].name == "read_file"
     assert done.message.tool_calls[0].arguments == {"path": "a.txt"}
+    assert mock_resp.is_closed
 
 
 @pytest.mark.asyncio
-async def test_anthropic_provider_streaming() -> None:
+async def test_anthropic_provider_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = AnthropicProvider(
         model="claude-3-5-sonnet",
         api_key="test-key",
@@ -206,7 +208,7 @@ async def test_anthropic_provider_streaming() -> None:
         'event: message_stop\ndata: {"type": "message_stop"}',
     ]
     mock_resp = make_sse_response(sse_data)
-    provider._transport.stream_post = AsyncMock(return_value=mock_resp)
+    monkeypatch.setattr(provider._transport, "stream_post", AsyncMock(return_value=mock_resp))
 
     req = ChatRequest(
         model="claude-3-5-sonnet",
@@ -228,8 +230,65 @@ async def test_anthropic_provider_streaming() -> None:
     assert done.finish_reason == FinishReason.STOP
     assert done.usage.prompt_tokens == 50
     assert done.usage.completion_tokens == 15
+    assert done.message is not None
     assert done.message.text == "Hello there"
     assert done.message.reasoning == "Let me think"
+    assert mock_resp.is_closed
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_tool_calls_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = AnthropicProvider(
+        model="claude-3-5-sonnet",
+        api_key="test-key",
+    )
+
+    sse_data = [
+        'event: message_start\ndata: {"type": "message_start", "message": {"usage": {"input_tokens": 100, "output_tokens": 10}}}',
+        'event: content_block_start\ndata: {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call_123", "name": "edit_file"}}',
+        'event: content_block_delta\ndata: {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\\"path\\": \\"test.txt\\""}}',
+        'event: content_block_delta\ndata: {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": ", \\"content\\": \\"hello\\"}"}}',
+        'event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}',
+        'event: message_delta\ndata: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 25}}',
+        'event: message_stop\ndata: {"type": "message_stop"}',
+    ]
+    mock_resp = make_sse_response(sse_data)
+    monkeypatch.setattr(provider._transport, "stream_post", AsyncMock(return_value=mock_resp))
+
+    req = ChatRequest(
+        model="claude-3-5-sonnet",
+        messages=[Message.user("Edit file")],
+    )
+
+    events = []
+    async for event in provider.stream(req):
+        events.append(event)
+
+    types = [type(e) for e in events]
+    assert ToolCallStart in types
+    assert ToolCallDelta in types
+    assert ToolCallEnd in types
+    assert DoneEvent in types
+
+    deltas = [e for e in events if isinstance(e, ToolCallDelta)]
+    assert len(deltas) == 2
+    assert deltas[0].arguments_delta == '{"path": "test.txt"'
+    assert deltas[1].arguments_delta == ', "content": "hello"}'
+
+    ends = [e for e in events if isinstance(e, ToolCallEnd)]
+    assert len(ends) == 1
+    assert ends[0].call is not None
+    assert ends[0].call.id == "call_123"
+    assert ends[0].call.name == "edit_file"
+    assert ends[0].call.arguments == {"path": "test.txt", "content": "hello"}
+
+    done = next(e for e in events if isinstance(e, DoneEvent))
+    assert done.finish_reason == FinishReason.TOOL_CALLS
+    assert done.usage.completion_tokens == 25
+    assert done.message is not None
+    assert len(done.message.tool_calls) == 1
+    assert done.message.tool_calls[0].name == "edit_file"
+    assert mock_resp.is_closed
 
 
 @pytest.mark.asyncio
@@ -271,7 +330,7 @@ async def test_http_transport_post_stream_and_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_compat_text_protocol() -> None:
+async def test_openai_compat_text_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = OpenAICompatProvider(
         base_url="https://api.openai.com/v1",
         model="gpt-4o",
@@ -287,7 +346,7 @@ async def test_openai_compat_text_protocol() -> None:
         'data: [DONE]',
     ]
     mock_resp = make_sse_response(sse_data)
-    provider.transport.stream_post = AsyncMock(return_value=mock_resp)
+    monkeypatch.setattr(provider.transport, "stream_post", AsyncMock(return_value=mock_resp))
 
     req = ChatRequest(
         model="gpt-4o",
@@ -316,7 +375,9 @@ async def test_openai_compat_text_protocol() -> None:
     assert tool_ends[0].call.arguments == {"path": "test.py"}
 
     done = next(e for e in events if isinstance(e, DoneEvent))
+    assert done.message is not None
     assert len(done.message.tool_calls) == 1
     assert done.message.tool_calls[0].name == "read_file"
     assert "Checking file:" in done.message.text
     assert "All done." in done.message.text
+    assert mock_resp.is_closed

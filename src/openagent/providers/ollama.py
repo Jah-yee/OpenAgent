@@ -256,7 +256,7 @@ class OllamaProvider(ChatProvider):
 
     async def list_models(self) -> list[ModelInfo]:
         try:
-            data = await self._transport.post_json("/api/tags", {})
+            data = await self._transport.get_json("/api/tags")
             models = data.get("models", [])
             return [
                 ModelInfo(

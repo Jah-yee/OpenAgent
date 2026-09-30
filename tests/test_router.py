@@ -45,6 +45,19 @@ def test_model_reference_parse_nested_slash() -> None:
     assert ref.raw == "openrouter/anthropic/claude-sonnet-4.5"
 
 
+def test_model_reference_parse_tagged_slash() -> None:
+    ref = ModelReference.parse("ollama/llama3.2:latest")
+    assert ref.provider_hint == "ollama"
+    assert ref.model_name == "llama3.2:latest"
+    assert ref.raw == "ollama/llama3.2:latest"
+
+    # Router should route this to OllamaProvider, not OpenAI fallback
+    router = ProviderRouter()
+    provider = router.resolve("ollama/llama3.2:latest")
+    assert isinstance(provider, OllamaProvider)
+    assert provider.model == "llama3.2:latest"
+
+
 def test_router_resolve_preset_names(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-mock-openai")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-mock-anthropic")

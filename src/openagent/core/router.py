@@ -15,11 +15,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ..providers.anthropic import AnthropicProvider
-from ..providers.custom import CustomJsonPathProvider
-from ..providers.gemini import GeminiProvider
-from ..providers.ollama import OllamaProvider
-from ..providers.openai_compat import OpenAICompatProvider
 from .presets import ProviderPreset, all_presets
 from .provider import ChatProvider
 
@@ -35,11 +30,13 @@ class ModelReference:
     @classmethod
     def parse(cls, ref: str) -> ModelReference:
         raw = ref.strip()
-        if ":" in raw:
-            hint, model = raw.split(":", 1)
-            return cls(provider_hint=hint.strip() or None, model_name=model.strip(), raw=raw)
+        # Prioritize '/' so namespaces like 'ollama/llama3.2:latest' or 'openrouter/anthropic/claude'
+        # are correctly split into provider_hint='ollama' and model_name='llama3.2:latest'
         if "/" in raw:
             hint, model = raw.split("/", 1)
+            return cls(provider_hint=hint.strip() or None, model_name=model.strip(), raw=raw)
+        if ":" in raw:
+            hint, model = raw.split(":", 1)
             return cls(provider_hint=hint.strip() or None, model_name=model.strip(), raw=raw)
         return cls(provider_hint=None, model_name=raw, raw=raw)
 
@@ -76,6 +73,8 @@ class ProviderRouter:
 
         # 1. If provider hint is explicitly 'custom'
         if ref.provider_hint == "custom":
+            from ..providers.custom import CustomJsonPathProvider
+
             return CustomJsonPathProvider(
                 base_url=base_url or "http://localhost:8000",
                 model=ref.model_name,
@@ -97,6 +96,8 @@ class ProviderRouter:
                     **kwargs,
                 )
             if ref.provider_hint == "ollama":
+                from ..providers.ollama import OllamaProvider
+
                 return OllamaProvider(
                     model=ref.model_name,
                     base_url=base_url or "http://localhost:11434",
@@ -105,6 +106,8 @@ class ProviderRouter:
                     **kwargs,
                 )
             if ref.provider_hint == "gemini":
+                from ..providers.gemini import GeminiProvider
+
                 key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
                 return GeminiProvider(
                     model=ref.model_name,
@@ -114,6 +117,8 @@ class ProviderRouter:
                     **kwargs,
                 )
             if ref.provider_hint == "anthropic":
+                from ..providers.anthropic import AnthropicProvider
+
                 key = api_key or os.environ.get("ANTHROPIC_API_KEY")
                 return AnthropicProvider(
                     model=ref.model_name,
@@ -123,7 +128,10 @@ class ProviderRouter:
                     **kwargs,
                 )
             # Unrecognized provider hint -> default to OpenAICompatProvider
-            env_key = os.environ.get(f"{ref.provider_hint.upper()}_API_KEY")
+            from ..providers.openai_compat import OpenAICompatProvider
+
+            env_name = f"{ref.provider_hint.upper().replace('-', '_')}_API_KEY"
+            env_key = os.environ.get(env_name)
             key = api_key or env_key or os.environ.get("OPENAI_API_KEY")
             return OpenAICompatProvider(
                 base_url=base_url or "https://api.openai.com/v1",
@@ -162,6 +170,8 @@ class ProviderRouter:
 
         # 5. Model prefix heuristics
         if model_lower.startswith("claude"):
+            from ..providers.anthropic import AnthropicProvider
+
             ant_preset = self._find_preset("anthropic")
             base = base_url or (ant_preset.base_url if ant_preset else "https://api.anthropic.com")
             key = api_key or (ant_preset.auth.resolve_key() if ant_preset else os.environ.get("ANTHROPIC_API_KEY"))
@@ -174,6 +184,8 @@ class ProviderRouter:
             )
 
         if model_lower.startswith("gemini"):
+            from ..providers.gemini import GeminiProvider
+
             gem_preset = self._find_preset("gemini")
             base = base_url or (
                 gem_preset.base_url if gem_preset else "https://generativelanguage.googleapis.com/v1beta"
@@ -192,6 +204,8 @@ class ProviderRouter:
             )
 
         if model_lower.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
+            from ..providers.openai_compat import OpenAICompatProvider
+
             openai_preset = self._find_preset("openai")
             base = base_url or (openai_preset.base_url if openai_preset else "https://api.openai.com/v1")
             key = api_key or (
@@ -207,6 +221,8 @@ class ProviderRouter:
             )
 
         if model_lower.startswith("deepseek"):
+            from ..providers.openai_compat import OpenAICompatProvider
+
             ds_preset = self._find_preset("deepseek")
             base = base_url or (ds_preset.base_url if ds_preset else "https://api.deepseek.com/v1")
             key = api_key or (
@@ -222,6 +238,8 @@ class ProviderRouter:
             )
 
         # 6. Fallback to OpenAICompatProvider
+        from ..providers.openai_compat import OpenAICompatProvider
+
         key = api_key or os.environ.get("OPENAI_API_KEY")
         return OpenAICompatProvider(
             base_url=base_url or "https://api.openai.com/v1",
@@ -243,39 +261,47 @@ class ProviderRouter:
     ) -> ChatProvider:
         key = preset.auth.resolve_key(api_key)
         effective_base_url = base_url or preset.base_url
+        merged_headers = {**preset.headers, **dict(extra_headers or {})}
 
         if preset.kind == "anthropic" or preset.name == "anthropic":
+            from ..providers.anthropic import AnthropicProvider
+
             return AnthropicProvider(
                 model=model,
                 base_url=effective_base_url,
                 api_key=key,
-                extra_headers=extra_headers,
+                extra_headers=merged_headers,
                 context_window=preset.context_window,
                 **kwargs,
             )
 
         if preset.kind == "gemini" or preset.name == "gemini":
+            from ..providers.gemini import GeminiProvider
+
             return GeminiProvider(
                 model=model,
                 base_url=effective_base_url,
                 api_key=key,
-                extra_headers=extra_headers,
+                extra_headers=merged_headers,
                 context_window=preset.context_window,
                 **kwargs,
             )
 
         if preset.kind == "ollama" or preset.name == "ollama":
+            from ..providers.ollama import OllamaProvider
+
             return OllamaProvider(
                 model=model,
                 base_url=effective_base_url,
                 api_key=key,
-                extra_headers=extra_headers,
+                extra_headers=merged_headers,
                 context_window=preset.context_window,
                 **kwargs,
             )
 
         # Default to OpenAICompatProvider
-        merged_headers = {**preset.headers, **dict(extra_headers or {})}
+        from ..providers.openai_compat import OpenAICompatProvider
+
         return OpenAICompatProvider(
             base_url=effective_base_url,
             model=model,

@@ -328,3 +328,59 @@ async def test_ollama_provider_tool_calls_streaming(monkeypatch: pytest.MonkeyPa
     assert len(done.message.tool_calls) == 1
     assert done.message.tool_calls[0].name == "calc"
     assert done.message.tool_calls[0].arguments == {"expr": "2+2"}
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_list_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GeminiProvider(model="gemini-2.0-flash")
+    mock_data = {
+        "models": [
+            {"name": "models/gemini-2.0-flash", "inputTokenLimit": 1000000, "outputTokenLimit": 8192},
+            {"name": "models/gemini-1.5-pro", "inputTokenLimit": 2000000, "outputTokenLimit": 8192},
+        ]
+    }
+    monkeypatch.setattr(provider.transport, "get_json", AsyncMock(return_value=mock_data))
+
+    models = await provider.list_models()
+    assert len(models) == 2
+    assert models[0].id == "gemini-2.0-flash"
+    assert models[0].context_window == 1000000
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_list_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = OllamaProvider(model="llama3.2")
+    mock_data = {
+        "models": [
+            {"name": "llama3.2:latest"},
+            {"name": "qwen2.5-coder:latest"},
+        ]
+    }
+    monkeypatch.setattr(provider.transport, "get_json", AsyncMock(return_value=mock_data))
+
+    models = await provider.list_models()
+    assert len(models) == 2
+    assert models[0].id == "llama3.2:latest"
+    assert models[1].id == "qwen2.5-coder:latest"
+
+
+@pytest.mark.asyncio
+async def test_gemini_safety_finish_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GeminiProvider(model="gemini-2.0-flash")
+    sse_data = (
+        'data: {"candidates": [{"finishReason": "SAFETY"}]}\n\n'
+    )
+    mock_resp = httpx.Response(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        stream=MockAsyncStream([sse_data.encode("utf-8")]),
+    )
+    monkeypatch.setattr(provider.transport, "stream_post", AsyncMock(return_value=mock_resp))
+
+    req = ChatRequest(model="gemini-2.0-flash", messages=[Message.user("Prompt")])
+    events = []
+    async for event in provider.stream(req):
+        events.append(event)
+
+    done = next(e for e in events if isinstance(e, DoneEvent))
+    assert done.finish_reason == FinishReason.CONTENT_FILTER

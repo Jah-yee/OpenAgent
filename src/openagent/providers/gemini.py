@@ -235,6 +235,8 @@ class GeminiProvider(ChatProvider):
                                 finish_reason = FinishReason.STOP
                             case "MAX_TOKENS":
                                 finish_reason = FinishReason.LENGTH
+                            case "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII":
+                                finish_reason = FinishReason.CONTENT_FILTER
                             case _:
                                 finish_reason = FinishReason.STOP
 
@@ -286,7 +288,7 @@ class GeminiProvider(ChatProvider):
 
     async def list_models(self) -> list[ModelInfo]:
         try:
-            data = await self._transport.post_json("/models", {})
+            data = await self._transport.get_json("/models")
             items = data.get("models", [])
             return [
                 ModelInfo(

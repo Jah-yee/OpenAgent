@@ -394,6 +394,17 @@ class ToolSpec:
             },
         }
 
+    def to_gemini_schema(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": {
+                "type": "object",
+                "properties": {p.name: p.to_schema() for p in self.params},
+                "required": [p.name for p in self.params if p.required],
+            },
+        }
+
     def signature(self) -> str:
         """Compact signature used by the text tool protocol."""
         args = ", ".join(

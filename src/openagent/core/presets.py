@@ -354,6 +354,9 @@ def all_presets() -> dict[str, ProviderPreset]:
     return {**BUILTIN_PRESETS, **LOCAL_PRESETS}
 
 
+PRESETS: dict[str, ProviderPreset] = all_presets()
+
+
 def find_preset(name: str) -> ProviderPreset | None:
     """Look up a preset by name, alias, or conventional spelling."""
     key = name.strip().lower().replace("_", "-")

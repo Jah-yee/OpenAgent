@@ -12,7 +12,7 @@ import contextlib
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,7 @@ from openagent.tools.registry import DEFAULT_DANGER_POLICIES, PermissionAction
 
 def _normalize_danger_policy(val: Mapping[str, Any] | None) -> dict[str, PermissionAction]:
     """Normalize a danger policy dictionary to PermissionAction enums."""
-    policy = dict(DEFAULT_DANGER_POLICIES)
+    policy: dict[str, PermissionAction] = {}
     if not val:
         return policy
     for k, v in val.items():
@@ -60,6 +60,34 @@ def _parse_mcp_servers(val: Any) -> list[MCPServerConfig]:
 
 
 @dataclass
+class CustomProviderConfig:
+    """JSONPath mappings and endpoint options for a custom HTTP API."""
+
+    jsonpath_text: str = "choices[0].delta.content"
+    jsonpath_thinking: str | None = None
+    jsonpath_tool_calls: str | None = None
+    jsonpath_input_tokens: str | None = None
+    jsonpath_output_tokens: str | None = None
+    chat_endpoint: str = "/chat/completions"
+    auth_scheme: str = "bearer"
+    auth_header: str = "authorization"
+
+    def provider_kwargs(self) -> dict[str, Any]:
+        if self.auth_scheme not in {"bearer", "api_key", "none"}:
+            raise ValueError(f"Unsupported custom auth scheme: {self.auth_scheme}")
+        return {
+            "text_path": self.jsonpath_text,
+            "thinking_path": self.jsonpath_thinking,
+            "tool_calls_path": self.jsonpath_tool_calls,
+            "usage_prompt_path": self.jsonpath_input_tokens,
+            "usage_completion_path": self.jsonpath_output_tokens,
+            "chat_endpoint": self.chat_endpoint,
+            "auth_header": "" if self.auth_scheme == "none" else self.auth_header,
+            "auth_prefix": "Bearer " if self.auth_scheme == "bearer" else "",
+        }
+
+
+@dataclass
 class OpenAgentConfig:
     """User and system runtime configuration for OpenAgent."""
 
@@ -69,6 +97,8 @@ class OpenAgentConfig:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    context_window: int | None = None
+    custom_provider: CustomProviderConfig | None = None
     max_tool_iterations: int = 25
     danger_policy: dict[str, PermissionAction] = field(
         default_factory=lambda: dict(DEFAULT_DANGER_POLICIES)
@@ -87,7 +117,10 @@ class OpenAgentConfig:
             self.workspace = self.workspace.resolve()
 
         if isinstance(self.danger_policy, Mapping):
-            self.danger_policy = _normalize_danger_policy(self.danger_policy)
+            self.danger_policy = {
+                **DEFAULT_DANGER_POLICIES,
+                **_normalize_danger_policy(self.danger_policy),
+            }
 
 
 def find_global_config_path() -> Path | None:
@@ -151,6 +184,7 @@ def _apply_dict_to_config(config_dict: dict[str, Any], current: dict[str, Any]) 
         "temperature",
         "top_p",
         "max_tokens",
+        "context_window",
         "max_tool_iterations",
         "auto_approve",
         "session_id",
@@ -169,6 +203,12 @@ def _apply_dict_to_config(config_dict: dict[str, Any], current: dict[str, Any]) 
 
     if "mcp_servers" in config_dict:
         current["mcp_servers"] = _parse_mcp_servers(config_dict["mcp_servers"])
+
+    if "custom_provider" in config_dict:
+        previous = current.get("custom_provider")
+        values = asdict(previous) if previous is not None else {}
+        values.update(config_dict["custom_provider"])
+        current["custom_provider"] = CustomProviderConfig(**values)
 
     if "extra_instructions" in config_dict:
         val = config_dict["extra_instructions"]
@@ -199,6 +239,8 @@ def load_config(
         "temperature": None,
         "top_p": None,
         "max_tokens": None,
+        "context_window": None,
+        "custom_provider": None,
         "max_tool_iterations": 25,
         "danger_policy": dict(DEFAULT_DANGER_POLICIES),
         "mcp_servers": [],
@@ -249,13 +291,18 @@ def load_config(
     if os.environ.get("OPENAGENT_MAX_TOKENS"):
         with contextlib.suppress(ValueError):
             config_data["max_tokens"] = int(os.environ["OPENAGENT_MAX_TOKENS"])
+    if os.environ.get("OPENAGENT_CONTEXT_WINDOW"):
+        with contextlib.suppress(ValueError):
+            config_data["context_window"] = int(os.environ["OPENAGENT_CONTEXT_WINDOW"])
     if os.environ.get("OPENAGENT_MAX_TOOL_ITERATIONS"):
         with contextlib.suppress(ValueError):
             config_data["max_tool_iterations"] = int(os.environ["OPENAGENT_MAX_TOOL_ITERATIONS"])
     if os.environ.get("OPENAGENT_WORKSPACE"):
         config_data["workspace"] = Path(os.environ["OPENAGENT_WORKSPACE"]).resolve()
     if os.environ.get("OPENAGENT_YES") or os.environ.get("OPENAGENT_AUTO_APPROVE"):
-        val = (os.environ.get("OPENAGENT_YES") or os.environ.get("OPENAGENT_AUTO_APPROVE", "")).lower()
+        val = (
+            os.environ.get("OPENAGENT_YES") or os.environ.get("OPENAGENT_AUTO_APPROVE", "")
+        ).lower()
         config_data["auto_approve"] = val in ("1", "true", "yes", "on")
 
     # 5. Explicit overrides
@@ -277,6 +324,8 @@ def load_config(
         temperature=config_data["temperature"],
         top_p=config_data["top_p"],
         max_tokens=config_data["max_tokens"],
+        context_window=config_data["context_window"],
+        custom_provider=config_data["custom_provider"],
         max_tool_iterations=config_data["max_tool_iterations"],
         danger_policy=config_data["danger_policy"],
         mcp_servers=config_data["mcp_servers"],
@@ -308,6 +357,8 @@ def save_config(config: OpenAgentConfig, target_path: str | Path) -> None:
         lines.append(f"top_p = {config.top_p}")
     if config.max_tokens is not None:
         lines.append(f"max_tokens = {config.max_tokens}")
+    if config.context_window is not None:
+        lines.append(f"context_window = {config.context_window}")
     lines.append(f"max_tool_iterations = {config.max_tool_iterations}")
     lines.append(f"auto_approve = {'true' if config.auto_approve else 'false'}")
     lines.append(f"workspace = {json.dumps(config.workspace.as_posix())}")
@@ -315,6 +366,12 @@ def save_config(config: OpenAgentConfig, target_path: str | Path) -> None:
     if config.extra_instructions:
         escaped_instr = [json.dumps(x) for x in config.extra_instructions]
         lines.append(f"extra_instructions = [{', '.join(escaped_instr)}]")
+
+    if config.custom_provider is not None:
+        lines.append("\n[custom_provider]")
+        for key, value in asdict(config.custom_provider).items():
+            if value is not None:
+                lines.append(f"{key} = {json.dumps(value)}")
 
     # Danger policy table
     lines.append("\n[danger_policy]")
@@ -337,7 +394,9 @@ def save_config(config: OpenAgentConfig, target_path: str | Path) -> None:
         if server.cwd:
             lines.append(f"cwd = {json.dumps(Path(server.cwd).as_posix())}")
         if server.env:
-            items = ", ".join(f"{json.dumps(k)} = {json.dumps(str(v))}" for k, v in server.env.items())
+            items = ", ".join(
+                f"{json.dumps(k)} = {json.dumps(str(v))}" for k, v in server.env.items()
+            )
             lines.append(f"env = {{ {items} }}")
 
     content = "\n".join(lines) + "\n"

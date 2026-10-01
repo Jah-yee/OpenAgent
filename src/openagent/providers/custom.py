@@ -21,6 +21,7 @@ from ..core.events import (
     StartEvent,
     StreamEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCallDelta,
     ToolCallEnd,
     ToolCallStart,
@@ -61,6 +62,7 @@ class CustomJsonPathProvider(ChatProvider):
         model: str,
         *,
         text_path: str | None = "choices[0].delta.content",
+        thinking_path: str | None = None,
         tool_calls_path: str | None = None,
         usage_prompt_path: str | None = None,
         usage_completion_path: str | None = None,
@@ -80,19 +82,23 @@ class CustomJsonPathProvider(ChatProvider):
         self.context_window = context_window or 128_000
 
         self.text_path = text_path
+        self.thinking_path = thinking_path
         self.tool_calls_path = tool_calls_path
         self.usage_prompt_path = usage_prompt_path
         self.usage_completion_path = usage_completion_path
 
         self._text_expr = jsonpath_ng.parse(text_path) if text_path else None
+        self._thinking_expr = jsonpath_ng.parse(thinking_path) if thinking_path else None
         self._tool_calls_expr = jsonpath_ng.parse(tool_calls_path) if tool_calls_path else None
-        self._usage_prompt_expr = jsonpath_ng.parse(usage_prompt_path) if usage_prompt_path else None
+        self._usage_prompt_expr = (
+            jsonpath_ng.parse(usage_prompt_path) if usage_prompt_path else None
+        )
         self._usage_completion_expr = (
             jsonpath_ng.parse(usage_completion_path) if usage_completion_path else None
         )
 
         request_headers = dict(headers or {})
-        if api_key:
+        if api_key and auth_header:
             header_name = auth_header.lower()
             if header_name == "authorization":
                 request_headers["Authorization"] = f"{auth_prefix}{api_key}"
@@ -131,6 +137,11 @@ class CustomJsonPathProvider(ChatProvider):
                 pass
 
         # 2. Tool calls
+        if self._thinking_expr:
+            for match in self._thinking_expr.find(chunk):
+                if match.value is not None and str(match.value):
+                    events.append(ThinkingDelta(text=str(match.value)))
+
         if self._tool_calls_expr:
             try:
                 matches = self._tool_calls_expr.find(chunk)
@@ -235,6 +246,7 @@ class CustomJsonPathProvider(ChatProvider):
             yield StartEvent(model=request.model, provider=self.name)
 
             text_parts: list[str] = []
+            thinking_parts: list[str] = []
             calls: list[ToolCall] = []
             usage = Usage()
 
@@ -253,6 +265,9 @@ class CustomJsonPathProvider(ChatProvider):
                         continue
                     for ev in self.parse_chunk(chunk):
                         match ev:
+                            case ThinkingDelta(text=t):
+                                thinking_parts.append(t)
+                                yield ev
                             case TextDelta(text=t):
                                 text_parts.append(t)
                                 yield ev
@@ -279,6 +294,9 @@ class CustomJsonPathProvider(ChatProvider):
                         continue
                     for ev in self.parse_chunk(chunk):
                         match ev:
+                            case ThinkingDelta(text=t):
+                                thinking_parts.append(t)
+                                yield ev
                             case TextDelta(text=t):
                                 text_parts.append(t)
                                 yield ev
@@ -294,7 +312,11 @@ class CustomJsonPathProvider(ChatProvider):
             finish = FinishReason.TOOL_CALLS if calls else FinishReason.STOP
             yield DoneEvent(
                 finish_reason=finish,
-                message=Message.assistant("".join(text_parts), tool_calls=calls),
+                message=Message.assistant(
+                    "".join(text_parts),
+                    tool_calls=calls,
+                    reasoning="".join(thinking_parts) or None,
+                ),
                 usage=usage,
             )
         finally:

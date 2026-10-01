@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import os
 import shutil
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -18,6 +19,46 @@ from openagent.core.types import ToolParam
 from openagent.tools.base import DangerLevel, Tool, ToolResult
 
 MAX_OUTPUT_BYTES = 100 * 1024  # 100 KB cap
+
+
+async def _collect_output(proc: asyncio.subprocess.Process) -> tuple[bytes, bytes, bool]:
+    """Drain both pipes while retaining at most MAX_OUTPUT_BYTES in total."""
+    remaining = MAX_OUTPUT_BYTES
+    truncated = False
+
+    async def drain(stream: asyncio.StreamReader | None) -> bytes:
+        nonlocal remaining, truncated
+        retained = bytearray()
+        if stream is None:
+            return b""
+        while chunk := await stream.read(8192):
+            keep = min(remaining, len(chunk))
+            retained.extend(chunk[:keep])
+            remaining -= keep
+            truncated = truncated or keep < len(chunk)
+        return bytes(retained)
+
+    stdout, stderr, _ = await asyncio.gather(drain(proc.stdout), drain(proc.stderr), proc.wait())
+    return stdout, stderr, truncated
+
+
+async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        if sys.platform == "win32":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/F",
+                "/T",
+                "/PID",
+                str(proc.pid),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+            if proc.returncode is None:
+                proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 def _truncate_output(text: str, cap: int = MAX_OUTPUT_BYTES) -> str:
@@ -95,6 +136,9 @@ class ShellTool(Tool):
             )
 
         # Prepare subprocess invocation
+        process_options: dict[str, Any] = (
+            {"start_new_session": True} if sys.platform != "win32" else {}
+        )
         try:
             if self.shell_type == "powershell":
                 proc = await asyncio.create_subprocess_exec(
@@ -108,6 +152,7 @@ class ShellTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(work_dir) if work_dir else None,
+                    **process_options,
                 )
             elif self.shell_type == "cmd":
                 proc = await asyncio.create_subprocess_exec(
@@ -117,6 +162,7 @@ class ShellTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(work_dir) if work_dir else None,
+                    **process_options,
                 )
             elif self.shell_type in ("bash", "sh"):
                 sh_binary = shutil.which(self.shell_type) or "/bin/sh"
@@ -127,6 +173,7 @@ class ShellTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(work_dir) if work_dir else None,
+                    **process_options,
                 )
             else:
                 proc = await asyncio.create_subprocess_shell(
@@ -134,6 +181,7 @@ class ShellTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(work_dir) if work_dir else None,
+                    **process_options,
                 )
         except Exception as exc:
             return ToolResult(
@@ -143,23 +191,26 @@ class ShellTool(Tool):
             )
 
         # Wait with timeout
+        collection = asyncio.create_task(_collect_output(proc))
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
+            stdout_bytes, stderr_bytes, truncated = await asyncio.wait_for(
+                asyncio.shield(collection),
                 timeout=timeout,
             )
         except TimeoutError:
-            with contextlib.suppress(Exception):
-                if sys.platform == "win32" and proc.pid:
-                    os.system(f"taskkill /F /T /PID {proc.pid} >nul 2>&1")
-                proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+            await _kill_process_tree(proc)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(collection, timeout=5)
             return ToolResult(
                 call_id=call_id,
                 output=f"Command timed out after {timeout} seconds.",
                 is_error=True,
             )
+        except asyncio.CancelledError:
+            await _kill_process_tree(proc)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(collection, timeout=5)
+            raise
 
         stdout_text = stdout_bytes.decode(sys.getdefaultencoding(), errors="replace")
         stderr_text = stderr_bytes.decode(sys.getdefaultencoding(), errors="replace")
@@ -169,7 +220,11 @@ class ShellTool(Tool):
 
         if not is_error:
             if stderr_text.strip():
-                output = f"{stdout_text.strip()}\n{stderr_text.strip()}" if stdout_text.strip() else stderr_text.strip()
+                output = (
+                    f"{stdout_text.strip()}\n{stderr_text.strip()}"
+                    if stdout_text.strip()
+                    else stderr_text.strip()
+                )
             else:
                 output = stdout_text.strip() or "(command completed with no output)"
         else:
@@ -182,6 +237,8 @@ class ShellTool(Tool):
 
         # Bound total combined output string
         output = _truncate_output(output, cap=MAX_OUTPUT_BYTES)
+        if truncated and "[Output truncated at 100KB]" not in output:
+            output += "\n... [Output truncated at 100KB]"
         return ToolResult(call_id=call_id, output=output, is_error=is_error)
 
 

@@ -341,7 +341,9 @@ async def test_runner_permission_ask_with_callback() -> None:
     turn1: list[StreamEvent] = [
         StartEvent(),
         ToolCallEnd(index=0, call=call),
-        DoneEvent(finish_reason=FinishReason.TOOL_CALLS, message=Message.assistant(tool_calls=[call])),
+        DoneEvent(
+            finish_reason=FinishReason.TOOL_CALLS, message=Message.assistant(tool_calls=[call])
+        ),
     ]
     turn2: list[StreamEvent] = [
         StartEvent(),
@@ -364,7 +366,9 @@ async def test_runner_permission_ask_with_callback() -> None:
     turn1_ok: list[StreamEvent] = [
         StartEvent(),
         ToolCallEnd(index=0, call=call),
-        DoneEvent(finish_reason=FinishReason.TOOL_CALLS, message=Message.assistant(tool_calls=[call])),
+        DoneEvent(
+            finish_reason=FinishReason.TOOL_CALLS, message=Message.assistant(tool_calls=[call])
+        ),
     ]
     turn2_ok: list[StreamEvent] = [
         StartEvent(),
@@ -398,7 +402,7 @@ async def test_runner_compaction_integration() -> None:
     msg_mgr.add_user("Step 1 done " + "y" * 200)
     msg_mgr.add_assistant("Acknowledged.")
 
-    # max_tokens small enough to trigger compaction
+    # Context budget small enough to trigger compaction
     max_budget = 80
 
     turns: list[list[StreamEvent]] = [
@@ -417,7 +421,7 @@ async def test_runner_compaction_integration() -> None:
         provider=provider,
         messages=msg_mgr,
         compactor=compactor,
-        max_tokens=max_budget,
+        context_window=max_budget + estimator.request_overhead,
     )
 
     events: list[StreamEvent] = []
@@ -536,7 +540,9 @@ async def test_runner_max_iterations_guard() -> None:
         [
             StartEvent(),
             ToolCallEnd(index=0, call=call),
-            DoneEvent(finish_reason=FinishReason.TOOL_CALLS, message=Message.assistant(tool_calls=[call])),
+            DoneEvent(
+                finish_reason=FinishReason.TOOL_CALLS, message=Message.assistant(tool_calls=[call])
+            ),
         ]
         for _ in range(10)
     ]

@@ -59,6 +59,7 @@ class AgentRunner:
         session_id: str | None = None,
         max_tool_iterations: int = 25,
         max_tokens: int | None = None,
+        context_window: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         workspace_root: str | Path | None = None,
@@ -77,12 +78,16 @@ class AgentRunner:
         self.session_store = session_store
         self.session_id = session_id
         self.max_tool_iterations = max_tool_iterations
-        self.max_tokens = (
-            max_tokens
-            if max_tokens is not None
+        self.max_tokens = max_tokens
+        self.context_window: int = (
+            context_window
+            if context_window is not None
             else getattr(provider, "context_window", None)
             or getattr(provider, "default_context_window", 128_000)
+            or 128_000
         )
+        if self.context_window <= 0 or (max_tokens is not None and max_tokens <= 0):
+            raise ValueError("Context window and output token limit must be positive.")
         self.temperature = temperature
         self.top_p = top_p
         self.workspace_root = workspace_root
@@ -125,7 +130,7 @@ class AgentRunner:
     ) -> AsyncIterator[StreamEvent]:
         """Execute a conversational turn across streaming model calls and tools."""
         self._ensure_system_prompt()
-        initial_msg_count = len(self.messages)
+        initial_messages = self.messages.copy().messages
 
         user_msg = Message.user(user_input) if isinstance(user_input, str) else user_input
         self.messages.append(user_msg)
@@ -133,33 +138,45 @@ class AgentRunner:
         cumulative_usage = Usage()
 
         for _ in range(self.max_tool_iterations):
+            tool_specs = self.tools.list_specs() if self.tools else []
+            estimator = self.messages.estimator
+            input_budget = (
+                self.context_window
+                - (self.max_tokens or 0)
+                - estimator.estimate_tools(tool_specs)
+                - estimator.request_overhead
+            )
+            system_message = self.messages.system_message
+            system_tokens = estimator.estimate_message(system_message) if system_message else 0
+            if input_budget <= system_tokens:
+                self.messages.clear()
+                self.messages.extend(initial_messages)
+                yield ErrorEvent(
+                    error=ValueError(
+                        "Context window is too small for system, tools and output budget."
+                    )
+                )
+                return
             # Check token budget and invoke Compactor if budget is exceeded
-            if (
-                self.max_tokens is not None
-                and self.compactor is not None
-                and self.messages.total_tokens() > self.max_tokens
-            ):
+            if self.compactor is not None and self.messages.total_tokens() > input_budget:
                 compacted = await self.compactor.compact(
                     self.messages.messages,
-                    self.max_tokens,
+                    input_budget,
                     provider=self.provider,
                 )
                 self.messages.clear()
                 self.messages.extend(compacted)
 
             # Window messages maintaining Atomic Tool Pair Invariant
-            if self.max_tokens is not None:
-                req_messages = self.messages.window(self.max_tokens)
-            else:
-                req_messages = self.messages.messages
+            req_messages = self.messages.window(input_budget)
 
-            tool_specs = self.tools.list_specs() if self.tools else []
             request = ChatRequest(
                 messages=req_messages,
                 model=self.model,
                 tools=tool_specs,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                max_tokens=self.max_tokens,
             )
 
             text_parts: list[str] = []
@@ -198,14 +215,14 @@ class AgentRunner:
                             yield event
             except Exception as exc:
                 err_ev = ErrorEvent(error=exc)
+                self.messages.clear()
+                self.messages.extend(initial_messages)
                 yield err_ev
-                while len(self.messages) > initial_msg_count:
-                    self.messages.pop()
                 return
 
             if error_encountered is not None:
-                while len(self.messages) > initial_msg_count:
-                    self.messages.pop()
+                self.messages.clear()
+                self.messages.extend(initial_messages)
                 return
 
             if done_event is not None and done_event.usage.total_tokens > 0:
@@ -268,7 +285,9 @@ class AgentRunner:
             # Reached max_tool_iterations without model concluding
             terminal_event = DoneEvent(
                 finish_reason=FinishReason.LENGTH,
-                message=Message.assistant("Reached maximum tool call iterations without concluding."),
+                message=Message.assistant(
+                    "Reached maximum tool call iterations without concluding."
+                ),
                 usage=cumulative_usage,
             )
             yield terminal_event

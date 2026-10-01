@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-brightgreen.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/Tests-151%20Passed-success.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-176%20Passed-success.svg)](tests/)
 [![MCP](https://img.shields.io/badge/MCP-1.0%20Compliant-purple.svg)](https://modelcontextprotocol.io)
 [![Code%20Style](https://img.shields.io/badge/Code%20Style-Ruff%20%7C%20Mypy-blueviolet.svg)](pyproject.toml)
 
@@ -301,6 +301,7 @@ base_url = "https://internal-ai.corp.net/v2/generate"
 api_key = "corp-token-xyz"
 
 [custom_provider]
+chat_endpoint = "" # base_url already points to the full generation endpoint
 auth_scheme = "bearer"
 jsonpath_text = "response.output.text"
 jsonpath_thinking = "response.output.reasoning"
@@ -355,6 +356,10 @@ Configuration files are loaded hierarchically:
 
 ### Full `openagent.toml` Example:
 
+`max_tokens` limits generated output. `context_window` optionally overrides the total
+model context capacity; input budgeting reserves space for output and tool schemas.
+When migrating an old input-budget setting, move that value to `context_window`.
+
 ```toml
 # Default model identifier
 model = "gpt-4o"
@@ -367,6 +372,8 @@ model = "gpt-4o"
 temperature = 0.2
 top_p = 0.95
 max_tokens = 4096
+# Optional input + output context window override; defaults to provider window
+# context_window = 128000
 max_tool_iterations = 25
 
 # Execution safety (true = bypass approval prompts)

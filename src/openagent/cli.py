@@ -22,6 +22,7 @@ from rich.table import Table
 
 from openagent import __version__
 from openagent.config import OpenAgentConfig, get_config_locations, load_config
+from openagent.core.events import ErrorEvent
 from openagent.core.presets import all_presets
 from openagent.core.router import ProviderRouter
 from openagent.runner import AgentRunner
@@ -276,7 +277,9 @@ def _cmd_config(console: Console, args: argparse.Namespace) -> int:
         "Temperature",
         str(cfg.temperature) if cfg.temperature is not None else "[dim](default)[/dim]",
     )
-    settings_table.add_row("Top P", str(cfg.top_p) if cfg.top_p is not None else "[dim](default)[/dim]")
+    settings_table.add_row(
+        "Top P", str(cfg.top_p) if cfg.top_p is not None else "[dim](default)[/dim]"
+    )
     settings_table.add_row(
         "Max Tokens",
         str(cfg.max_tokens) if cfg.max_tokens is not None else "[dim](default)[/dim]",
@@ -302,10 +305,18 @@ def _build_runner(
 ) -> tuple[AgentRunner, MCPManager | None]:
     """Construct an initialized AgentRunner from configuration."""
     router = ProviderRouter()
+    model_ref = cfg.model
+    provider_kwargs = {}
+    if cfg.custom_provider is not None:
+        model_ref = (
+            cfg.model if cfg.model.startswith(("custom/", "custom:")) else f"custom/{cfg.model}"
+        )
+        provider_kwargs = cfg.custom_provider.provider_kwargs()
     provider = router.resolve(
-        cfg.model,
+        model_ref,
         api_key=cfg.api_key,
         base_url=cfg.base_url,
+        **provider_kwargs,
     )
 
     registry = ToolRegistry(danger_policies=cfg.danger_policy)
@@ -325,7 +336,6 @@ def _build_runner(
 
     runner = AgentRunner(
         provider=provider,
-        model=cfg.model,
         tools=registry,
         session_store=session_store,
         session_id=cfg.session_id,
@@ -333,6 +343,7 @@ def _build_runner(
         temperature=cfg.temperature,
         top_p=cfg.top_p,
         max_tokens=cfg.max_tokens,
+        context_window=cfg.context_window,
         workspace_root=cfg.workspace,
         extra_instructions=cfg.extra_instructions,
     )
@@ -361,9 +372,11 @@ async def _async_run(args: argparse.Namespace, console: Console) -> int:
             prompt = " ".join(args.prompt) if isinstance(args.prompt, list) else str(args.prompt)
             app = TUIApp(console=console)
             ask_cb = make_ask_callback(console=console, auto_approve=cfg.auto_approve)
+            failed = False
             async for event in runner.run_turn(prompt, ask_callback=ask_cb):
                 app.render_event(event)
-            return 0
+                failed = failed or isinstance(event, ErrorEvent)
+            return 1 if failed else 0
         else:
             # Interactive chat REPL
             await run_repl(runner, console=console, auto_approve=cfg.auto_approve)
@@ -383,12 +396,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     # If no subcommand was provided but a prompt positional argument is present, default to 'run'
     known_subcommands = {"run", "chat", "models", "sessions", "config"}
     val_options = {
-        "--model", "-m",
+        "--model",
+        "-m",
         "--base-url",
         "--api-key",
-        "--workspace", "-w",
-        "--resume", "-r",
-        "--config", "-c",
+        "--workspace",
+        "-w",
+        "--resume",
+        "-r",
+        "--config",
+        "-c",
     }
 
     has_subcommand = False

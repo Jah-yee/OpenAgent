@@ -51,10 +51,10 @@ class MCPManager:
             await self.stop_server(name)
 
         client = self._client_factory(config)
+        wrapped_tools: list[MCPTool] = []
         try:
             await client.connect()
             mcp_tool_defs = await client.list_tools()
-            wrapped_tools: list[MCPTool] = []
             for tool_def in mcp_tool_defs:
                 tool = MCPTool(
                     client=client,
@@ -141,7 +141,9 @@ class MCPManager:
                         configs.append(MCPServerConfig.from_dict(cfg, name=name))
         else:
             for name, cfg in data.items():
-                if isinstance(cfg, Mapping) and any(k in cfg for k in ("command", "url", "transport")):
+                if isinstance(cfg, Mapping) and any(
+                    k in cfg for k in ("command", "url", "transport")
+                ):
                     configs.append(MCPServerConfig.from_dict(cfg, name=str(name)))
 
         return cls(

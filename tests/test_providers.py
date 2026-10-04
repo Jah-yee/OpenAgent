@@ -381,3 +381,27 @@ async def test_openai_compat_text_protocol(monkeypatch: pytest.MonkeyPatch) -> N
     assert "Checking file:" in done.message.text
     assert "All done." in done.message.text
     assert mock_resp.is_closed
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("https://api.openai.com", "https://api.openai.com/v1"),
+        ("https://api.openai.com/", "https://api.openai.com/v1"),
+        ("https://api.openai.com/v1", "https://api.openai.com/v1"),
+        (
+            "https://api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1",
+        ),
+        ("http://localhost:11434", "http://localhost:11434/v1"),
+        ("http://localhost:11434/v1", "http://localhost:11434/v1"),
+        ("https://api.deepseek.com/v1/chat/completions", "https://api.deepseek.com/v1"),
+    ],
+)
+def test_normalise_base_url(raw: str, expected: str) -> None:
+    """Test that _normalise_base_url correctly handles api.openai.com.
+
+    Regression test for: https://github.com/mj10612/OpenAgent/issues/14
+    The /v1 suffix must be appended to api.openai.com bare hosts.
+    """
+    assert OpenAICompatProvider._normalise_base_url(raw) == expected

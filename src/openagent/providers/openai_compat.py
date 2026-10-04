@@ -170,8 +170,9 @@ class OpenAICompatProvider(ChatProvider):
         url = base_url.rstrip("/")
         if url.endswith("/chat/completions"):
             url = url[: -len("/chat/completions")]
-        if not url.endswith("/v1") and "api.openai.com" not in url:
-            # Most OpenAI-compatible servers expose their API under /v1.
+        if not url.endswith("/v1"):
+            # Most OpenAI-compatible servers, including api.openai.com, expose
+            # their chat API under /v1.
             url = f"{url}/v1"
         return url
 
